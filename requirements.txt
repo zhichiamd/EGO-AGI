@@ -1,0 +1,17 @@
+# EGO AGI — 运行依赖（Runtime Dependencies）
+#
+# 安装：pip install -r requirements.txt
+#
+# 说明：
+#   以下为源码直接 import 的第三方库（已按 AST 扫描核对）；
+#   构建/打包依赖（nuitka / ordered-set / zstandard）由 build.bat 单独安装，
+#   不在此文件内，不影响运行环境的安装。
+
+# HTTP 客户端：调用 LM Studio / Ollama 的 REST 接口
+requests>=2.28.0
+
+# 环境变量加载：在 import config 之前读取项目根目录的 untitled.env
+python-dotenv>=1.0.0
+
+# 向量记忆存储：objective_memory 集合（Ollama bge-m3 embedding）
+chromadb>=0.5.0

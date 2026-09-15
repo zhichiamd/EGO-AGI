@@ -1,0 +1,57 @@
+# ═══════════════════════════════════════════════════════════
+# EGO Agent — Git 忽略规则
+# 目标：排除运行时隐私数据、环境变量与构建产物
+# ═══════════════════════════════════════════════════════════
+
+# ── 运行时数据（对话历史 / 备忘录 / 向量记忆 / 日志，含隐私）──
+# 注意：用 data/* 而非 data/，否则父目录被整体忽略后无法用 ! 再包含内部文件
+data/*
+
+# ── 配置种子文件（随仓库发布，供克隆后开箱即用）──
+!data/sys.json
+!data/prompts/
+
+# ── EGO 生成的输出产物（如需作为示例展示，可将其加入白名单）──
+输出/
+
+# ── 环境变量与密钥（保留示例模板 untitled.env.example）──
+*.env
+!*.env.example
+
+# ── 构建产物（Nuitka / PyInstaller / 打包虚拟环境）──
+dist/
+build/
+_build_venv/
+venv/
+.venv/
+*.build/
+*.dist/
+*.onefile-build/
+*.spec
+*.exe
+nuitka-crash-report.xml
+
+# ── Python 缓存与编译文件 ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+
+# ── 备份资源（含个人路径与说明文件）──
+资源备份/
+
+# ── 日志与临时文件 ──
+*.log
+*.tmp
+_tmp*
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── 编辑器 / 操作系统 ──
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
