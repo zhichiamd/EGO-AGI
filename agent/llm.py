@@ -82,6 +82,35 @@ def add_timestamps(messages: list) -> list:
                         part["text"] = prefix + text
     return messages
 
+
+# ── 消息角色前缀（[用户]/[自己]）────────────────────────────
+# 自述角色包裹（见 prompts.py 角色契约）：
+#   【EGO: ...】= 与自我的对话；【系统: ...】= 系统提示 / 指令执行反馈
+# 这类内容已自带角色标签，序列化时不再叠加 "[用户]" 前缀，避免出现
+# "[用户]\n（时间）【系统: ...】" 的双重角色标注，使模型误判为普通用户输入
+SELF_DECLARED_ROLE_RE = re.compile(r"^\s*【\s*(?:EGO|系统)\s*[:：]")
+
+
+def _has_self_declared_role(content) -> bool:
+    """user 消息内容是否自带 【EGO:】/【系统:】 角色标签（自动剥离前置时间戳）"""
+    if not isinstance(content, str):
+        return False
+    return bool(SELF_DECLARED_ROLE_RE.match(TS_PREFIX_RE.sub("", content, count=1)))
+
+
+def _apply_role_prefix(role: str, text: str) -> str:
+    """按角色为纯文本消息附加 [用户]/[自己] 前缀
+
+    例外：user 消息内容已自带 【EGO:】/【系统:】 角色标签时保持原样——
+    覆盖 L2 自省、备忘录审查、自我定义、Think、冷启动等系统触发的任务提示。
+    """
+    if role == "assistant":
+        return f"[自己]\n{text}"
+    if role == "user":
+        return text if _has_self_declared_role(text) else f"[用户]\n{text}"
+    return text
+
+
 class LMStudioClient:
     """LM Studio API 客户端，支持 Responses 模式"""
 
@@ -556,10 +585,11 @@ class LMStudioClient:
                 if msg["role"] == "system":
                     system_prompt = msg["content"]
                 elif msg["role"] == "user":
-                    conversation_parts.append(f"[用户]\n{msg['content']}")
+                    # 自带 【EGO:】/【系统:】 角色标签的消息不再叠加 [用户] 前缀
+                    conversation_parts.append(_apply_role_prefix("user", msg["content"]))
                 elif msg["role"] == "assistant":
                     # 【修改】不过滤 <<EGO: >> 格式，原样传递
-                    conversation_parts.append(f"[自己]\n{msg['content']}")
+                    conversation_parts.append(_apply_role_prefix("assistant", msg["content"]))
         
             # 延迟加载策略：如果对话轮次过多，只保留最近的关键对话
             max_rounds = RESPONSES_API_MAX_INITIAL_ROUNDS
@@ -583,10 +613,11 @@ class LMStudioClient:
             
             for msg in messages:
                 if msg["role"] == "user":
-                    input_parts.append(f"[用户]\n{msg['content']}")
+                    # 自带 【EGO:】/【系统:】 角色标签的消息不再叠加 [用户] 前缀
+                    input_parts.append(_apply_role_prefix("user", msg["content"]))
                 elif msg["role"] == "assistant":
                     # 【修改】不过滤 <<EGO: >> 格式，原样传递
-                    input_parts.append(f"[自己]\n{msg['content']}")
+                    input_parts.append(_apply_role_prefix("assistant", msg["content"]))
             
             # 返回所有消息的组合
             if input_parts:
@@ -614,19 +645,20 @@ class LMStudioClient:
                     items.append({"role": "system", "content": text})
                 continue
             
-            prefix = "[用户]\n" if role == "user" else "[自己]\n"
-            
             if isinstance(content, list):
                 parts = []
                 for part in content:
                     if isinstance(part, dict) and part.get("type") == "input_text":
-                        parts.append({"type": "input_text", "text": prefix + part.get("text", "")})
+                        parts.append({
+                            "type": "input_text",
+                            "text": _apply_role_prefix(role, part.get("text", "")),
+                        })
                     else:
                         # input_image 等结构原样透传
                         parts.append(part)
                 items.append({"role": role, "content": parts})
             else:
-                items.append({"role": role, "content": prefix + str(content)})
+                items.append({"role": role, "content": _apply_role_prefix(role, str(content))})
         
         return items
 

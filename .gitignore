@@ -49,6 +49,10 @@ _tmp*
 .mypy_cache/
 .ruff_cache/
 
+# ── 本地留存文件（不入库；正式示例副本见 showcase/）──
+/项目简介.txt
+/大泥洼的文明演习.doc
+
 # ── 编辑器 / 操作系统 ──
 .vscode/
 .idea/

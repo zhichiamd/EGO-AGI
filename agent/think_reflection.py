@@ -356,6 +356,8 @@ class ThinkReflectionMixin:
                     })
                     
                     result = self.executor.execute(instr)
+                    if result.skipped:
+                        continue  # 阶段门控：检索类指令在 Think 阶段不执行，静默跳过
                     if result.success:
                         _auto_log(f"[Think]   ✓ 执行指令: {instr.kind}")
                         executed_any = True
@@ -396,8 +398,6 @@ class ThinkReflectionMixin:
             f"当前共有 {len(entries)} 条认知：\n\n{entries_text}\n\n"
             "如果通过整合多条认知产生更高阶的新认知，使用 <COG_ADD> 新认知内容 </COG_ADD> 指令添加；\n"
             "如果发现需要删除的条目，使用 <COG_DEL> 错误、失效、被合并的认知 ID </COG_DEL> 指令删除；\n"
-            "如果自省过程中产生新备忘事项，使用 <TOOL> [NOTE_ADD] 新备忘事项 </TOOL> 添加；\n"
-            "如果没有需要操作的内容，无需输出任何指令。\n"
             "重要：\n"
             "一、每条指令必须闭合：以开标签开始指令，以对应的闭标签结束指令；指令必须使用大写字母，严禁使用小写字母。\n"
             "  *正确示例*：<COG_DEL> L2_001 </COG_DEL>；\n"
@@ -410,7 +410,8 @@ class ThinkReflectionMixin:
             "  *错误示例*：<COG_ADD> 新认知内容 <COG_DEL> L2_123 </COG_DEL> </COG_ADD>  ---错误的在指令内部嵌套指令。\n"
             "三、输出时非真实使用（如仅提及、回顾格式等）某个指令标签时，必须用反引号包裹该指令标签使其失效，严禁裸写指令标签。\n"
             "  *正确示例*：使用前检查指令格式 `<COG_ADD>` 新认知内容 `</COG_ADD>`；\n"
-            "  *错误示例*：使用前检查指令格式 <COG_ADD> 新认知内容 </COG_ADD>  ---裸写指令标签，应为`<COG_ADD>`和`</COG_ADD>`。"
+            "  *错误示例*：使用前检查指令格式 <COG_ADD> 新认知内容 </COG_ADD>  ---裸写指令标签，应为`<COG_ADD>`和`</COG_ADD>`。\n"
+            "四、本次审查任务的输出仅可使用 COG_ADD 和 COG_DEL 指令（不使用其它指令）；如果没有需要操作的内容，无需输出任何指令。\n"
         )
         
         reflection_messages = [
@@ -434,13 +435,12 @@ class ThinkReflectionMixin:
 
             total_cog_del = sum(1 for instr in reflection_instructions if instr.kind == "COG_DEL")
             total_cog_add = sum(1 for instr in reflection_instructions if instr.kind == "COG_ADD")
-            total_note_add = sum(1 for instr in reflection_instructions if instr.kind == "NOTE_ADD")
-            _auto_log(f"[自省] 检测到 {total_cog_del} 条 COG_DEL、{total_cog_add} 条 COG_ADD、{total_note_add} 条 NOTE_ADD 指令，开始执行...")
+            _auto_log(f"[自省] 检测到 {total_cog_del} 条 COG_DEL、{total_cog_add} 条 COG_ADD指令，开始执行...")
             
             for idx, instr in enumerate(reflection_instructions):
                 # 【设计】自省阶段白名单：COG_DEL/COG_ADD（核心语义）+ NOTE_ADD（自省中产生的新备忘），
                 # 其余指令（MEMO_RD/NOTE_RD/CONTINUE/SAY 等）在此阶段不执行
-                if instr.kind in ("COG_DEL", "COG_ADD", "NOTE_ADD"):
+                if instr.kind in ("COG_DEL", "COG_ADD"):
                     try:
                         _auto_log(f"[自省] [{idx+1}/{len(reflection_instructions)}] 正在处理: {instr.payload}")
                         result = self.executor.execute(instr)

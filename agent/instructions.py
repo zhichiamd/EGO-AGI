@@ -18,6 +18,7 @@
 - NOTE_ADD：添加备忘录
 - NOTE_RD：检索备忘录
 - NOTE_DEL：删除备忘录
+- WEB_SRCH：联网检索（Tavily）
 """
 
 from __future__ import annotations
@@ -107,16 +108,17 @@ class InstructionResult:
     success: bool
     message: str
     data: dict = field(default_factory=dict)
+    skipped: bool = False        # 因阶段门控被跳过（既非成功亦非失败；调用方应静默处理，不计入执行）
 
 
 # ── 指令注册表（单一事实源）──────────────────────────────────────
 # 全部指令标签在此声明；解析正则、纠错循环、执行优先级、协议注入全部由此派生。
 # 新增指令：用 @register_instruction 装饰执行函数即可，其它位置零改动。
 INSTRUCTION_TAGS = ("THINK", "SAY", "TOOL", "CONTINUE", "MEMO_RD", "COG_ADD", "COG_DEL",
-                    "NOTE_ADD", "NOTE_RD", "NOTE_DEL")
+                    "NOTE_ADD", "NOTE_RD", "NOTE_DEL", "WEB_SRCH")
 
 # 需经 <TOOL>[NAME] 解包的工具子指令（不作为顶层标签直接解析）
-_TOOL_ONLY_INSTRUCTION_TAGS = ("CONTINUE", "MEMO_RD", "NOTE_ADD", "NOTE_RD", "NOTE_DEL")
+_TOOL_ONLY_INSTRUCTION_TAGS = ("CONTINUE", "MEMO_RD", "NOTE_ADD", "NOTE_RD", "NOTE_DEL", "WEB_SRCH")
 
 # 匹配 <TOOL> 内首个 [名称] 前缀（工具子指令解包用）
 _TOOL_PREFIX_RE = re.compile(r'^\s*\[([A-Za-z0-9_]+)\]\s*(.*)$', re.DOTALL)
@@ -137,6 +139,7 @@ class InstructionSpec:
     priority: int = 99           # 执行优先级（小者先执行，替代原硬编码优先级表）
     protocol: str = ""           # 注入系统提示词的协议说明（新增指令时填写）
     normalize: dict = None       # 【归一化层】自然语言转译规则（如 {"kind": "note_add"}；None=不转译）
+    allowed_stages: tuple = None  # 【阶段门控】仅在这些阶段执行（None=不限）；检索类结果须回注，故限 "chat"
 
 
 _REGISTRY: dict[str, InstructionSpec] = {}
@@ -412,7 +415,7 @@ def parse_instructions(text: str) -> list[ParsedInstruction]:
             })
     
     # ===== 阶段2.5：解包统一工具标签 <TOOL>[名称] =====
-    # LLM 以 <TOOL> [NAME] 内容 </TOOL> 输出工具指令（CONTINUE/MEMO_RD/NOTE_ADD/NOTE_RD/NOTE_DEL），
+    # LLM 以 <TOOL> [NAME] 内容 </TOOL> 输出工具指令（CONTINUE/MEMO_RD/WEB_SRCH/NOTE_ADD/NOTE_RD/NOTE_DEL），
     # 解包为真实指令使下游（注册表分发/归一化/核心循环）零改动；[名称] 命中工具集合才解包，
     # 否则保留为 TOOL 交由容器 handler 报错回馈（不静默丢失），供 LLM 下一轮自愈。
     for instr in instructions_found:
@@ -554,6 +557,17 @@ class InstructionExecutor:
         spec = _REGISTRY.get(instr.kind)
         if spec is None or spec.handler is None:
             return InstructionResult(instr, False, f"未知指令: {instr.kind}")
+        # 【阶段门控】声明了 allowed_stages 的指令仅在授权阶段执行（如检索类限 "chat"，
+        # 因其结果须回注下一轮才能被消费）。非授权阶段静默跳过：不做无意义 I/O，
+        # 也不返回失败——避免冷启动/预热/Think 里堆积"指令执行失败"告警噪音。
+        if spec.allowed_stages is not None:
+            stage = (self._current_context or {}).get("stage")
+            if stage not in spec.allowed_stages:
+                return InstructionResult(
+                    instr, True,
+                    f"{instr.kind} 在「{stage or '未知'}」阶段不执行"
+                    f"（仅限 {'/'.join(spec.allowed_stages)}）：结果无处回注",
+                    {"stage_gated": True}, skipped=True)
         # 【归一化层】自然语言 payload → 标准协议文本（幂等；失败/熔断/未启用 → 透传原样）
         # 用 replace 生成新指令对象，不污染调用方持有的原 instr
         # 【修复】归一化独立保护：转译异常时降级透传原 payload，不影响指令执行（与降级哲学一致）
@@ -636,7 +650,7 @@ class InstructionExecutor:
     # ── 信息操作指令 ────────────────────────────────────────────
     @register_instruction("MEMO_RD", description="检索历史会话",
                           executable=True, route_back=True, inject_result=True, priority=0,
-                          normalize={"kind": "memo_rd"})
+                          normalize={"kind": "memo_rd"}, allowed_stages=("chat",))
     def _cmd_recall(self, instr: ParsedInstruction) -> InstructionResult:
         if not instr.payload:
             return InstructionResult(instr, False, "MEMO_RD 需要提供检索关键词")
@@ -717,7 +731,7 @@ class InstructionExecutor:
 
     @register_instruction("NOTE_RD", description="读取备忘录条目",
                           executable=True, route_back=True, inject_result=True, priority=0,
-                          normalize={"kind": "note_rd"})
+                          normalize={"kind": "note_rd"}, allowed_stages=("chat",))
     def _cmd_note_rd(self, instr: ParsedInstruction) -> InstructionResult:
         """ID → 完整内容；关键词 → 部分字段；LIST → 全部部分字段"""
         if self.note is None:
@@ -756,3 +770,25 @@ class InstructionExecutor:
             return InstructionResult(instr, False, "NOTE_DEL 只允许使用条目 ID（如 N_001），不要添加注解文本")
         deleted, reason = self.note.delete(note_id)
         return InstructionResult(instr, deleted, reason)
+
+    # ── 联网检索指令 ────────────────────────────────────────────
+    # 协议文案见 prompts.py LAYER1_DEFAULT.rules「（四）联网检索」，注册时 protocol 留空避免重复注入。
+    # 【共享预算】与 MEMO_RD / NOTE_RD 共用轮次限额（循环兜底防检索空转），不单独计数。
+    # 【失败自愈】on_failure_feedback 将人话失败原因（未配 Key / 超时 / 配额）回注下一轮。
+    # 【不归一化】payload 本身就是自然语言检索词，无需经 FLM 转译（normalize 留空）。
+    # 【阶段门控】allowed_stages=("chat",)：检索结果须回注下一轮方能被消费，而
+    # 冷启动/预热/Think 是直 execute() 后丢弃结果，故这些阶段由 execute() 统一
+    # 静默跳过（不做无谓网络请求/配额消耗，也不产生"执行失败"告警噪音）。
+    @register_instruction("WEB_SRCH", description="联网检索（Tavily）",
+                          executable=True, route_back=True, inject_result=True,
+                          on_failure_feedback=True, priority=0,
+                          allowed_stages=("chat",))
+    def _cmd_web_search(self, instr: ParsedInstruction) -> InstructionResult:
+        if not instr.payload or not instr.payload.strip():
+            return InstructionResult(instr, False, "WEB_SRCH 需要提供检索关键词")
+        # 【降级】导入/执行异常由 execute() 的兜底逻辑转失败结果，不向上传播
+        from agent.web_search import search
+        ok, message, results = search(instr.payload.strip())
+        if not ok:
+            return InstructionResult(instr, False, message)
+        return InstructionResult(instr, True, message, {"results": results})

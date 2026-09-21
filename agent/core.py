@@ -398,6 +398,8 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                             if _is_executable(n_instr.kind):
                                 self.executor.set_context({"stage": "preheat", "step": i})
                                 result = self.executor.execute(n_instr)
+                                if result.skipped:
+                                    continue  # 阶段门控：检索类指令本阶段不执行，静默跳过
                                 if result.success:
                                     _auto_log(f"[预热]   ✓ 执行嵌套指令: {n_instr.kind}")
                         # 清理 SAY payload 中的嵌套指令标签
@@ -417,6 +419,8 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                     
                     self.executor.set_context({"stage": "preheat", "step": i})
                     result = self.executor.execute(instr)
+                    if result.skipped:
+                        continue  # 阶段门控：检索类指令本阶段不执行，静默跳过
                     if result.success:
                         _auto_log(f"[预热]   ✓ 执行指令: {instr.kind}")
                     else:
@@ -521,6 +525,8 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                             if _is_executable(n_instr.kind):
                                 self.executor.set_context({"stage": "coldstart", "step": i})
                                 result = self.executor.execute(n_instr)
+                                if result.skipped:
+                                    continue  # 阶段门控：检索类指令本阶段不执行，静默跳过
                                 if result.success:
                                     _auto_log(f"[冷启动]   ✓ 执行嵌套指令: {n_instr.kind}")
                         # 清理 SAY payload 中的嵌套指令标签
@@ -546,6 +552,8 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                     })
                     
                     result = self.executor.execute(instr)
+                    if result.skipped:
+                        continue  # 阶段门控：检索类指令本阶段不执行，静默跳过
                     if result.success:
                         _auto_log(f"[冷启动]   ✓ 执行指令: {instr.kind}")
                     else:
@@ -1628,13 +1636,13 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
 
             result = self.executor.execute(instr)
 
-            status = "✓" if result.success else ""
+            status = "✓" if result.success and not result.skipped else ""
             executed_instrs.append(f"{instr.kind}({status})")
 
             # 【修复】route_back / inject_result 等属性改为独立判断（原 if-elif 互斥链导致
             # MEMO_RD/NOTE_RD 同时声明 route_back+inject_result 时 inject_result 分支成为死代码，
             # 检索结果全部丢失；独立 if 后各分支按需触发，结果统一入队事件通道）
-            if _spec is not None and _spec.inject_result and result.success:
+            if _spec is not None and _spec.inject_result and result.success and not result.skipped:
                 self._handle_memo_rd_result(state, instr, result, control)
 
             if _spec is not None and _spec.route_back:
@@ -1722,7 +1730,7 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
     def _handle_memo_rd_result(self, state: _EgoLoopState, instr, result,
                                control: _RoundControl) -> None:
         """
-        【重构】检索类指令（MEMO_RD/NOTE_RD）结果处理：检索结果入队事件通道
+        【重构】检索类指令（MEMO_RD/NOTE_RD/WEB_SRCH）结果处理：检索结果入队事件通道
         （带来源标签注入下一轮上下文）并回写引用计数；检索为空时同样注入
         "未找到"提示（LLM 可能正处于等待检索结果的挂起状态，须被告知空结果）。
         事件来源由 instr.kind 派生，注入前缀不再硬编码 MEMO_RD。
@@ -1748,13 +1756,16 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                     _auto_log(f"[警告] 引用计数回写失败: {e}，不影响本轮对话", level=logging.WARNING)
 
                 # 【调试】输出每条检索结果的详细内容
+                # （WEB_SRCH 外部结果字段可能与记忆不同，数值缺失时降级为原样输出，避免格式化异常）
                 for i, r in enumerate(results, 1):
                     mem_type = r.get("memory_type", "?")
                     content = r.get("content", "")
                     score = r.get("score", 0)
                     sim = r.get("similarity", 0)
                     role = r.get("role", "")
-                    _auto_log(f"[调试]   {instr.kind} [{i}/{len(results)}] 类型={mem_type} 综合={score:.3f} 相似度={sim:.0%} 角色={role}")
+                    score_txt = f"{score:.3f}" if isinstance(score, (int, float)) else str(score)
+                    sim_txt = f"{sim:.0%}" if isinstance(sim, (int, float)) else str(sim)
+                    _auto_log(f"[调试]   {instr.kind} [{i}/{len(results)}] 类型={mem_type} 综合={score_txt} 相似度={sim_txt} 角色={role}")
                     _auto_log(f"[调试]     内容: {content[:200]}{'...' if len(content) > 200 else ''}")
 
             else:
@@ -1765,11 +1776,16 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                 # 防止 LLM 反复发起空检索死循环。
                 control.round_recall_count += 1
                 state.recall_count += 1
-                empty_msg = f"{instr.kind} 检索「{instr.payload[:50]}」结果为空：{result.message}"
+                # WEB_SRCH 的 message 本身已含"未找到与「X」相关的联网结果"，再套前缀会重复关键词；
+                # 其余检索指令沿用"类型 + 关键词 + 原因"的拼装格式
+                if instr.kind == "WEB_SRCH":
+                    empty_msg = result.message
+                else:
+                    empty_msg = f"{instr.kind} 检索「{instr.payload[:50]}」结果为空：{result.message}"
                 _auto_log(f"[调试] ℹ {empty_msg}（空结果提示已注入下一轮）")
                 self.events.push(instr.kind, empty_msg)
         else:
-            _auto_log(f"[调试] ✗ MEMO_RD 指令执行失败: {result.message}", level=logging.WARNING)
+            _auto_log(f"[调试] ✗ {instr.kind} 指令执行失败: {result.message}", level=logging.WARNING)
 
     def _run_ego_loop(self, user_input: str, images: list, start_time: float,
                       stage: str = "chat") -> _EgoLoopState:
@@ -1883,14 +1899,15 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             if round_num == MAX_EGO_ROUNDS - 1 and self._check_loop_repetition(state):
                 break
             
-            # 【修复】防止MEMO_RD无限循环（每轮最多2次，总计不超过5次）
+            # 【修复】防止检索类指令无限循环（MEMO_RD / NOTE_RD / WEB_SRCH 共用同一预算：
+            # 单轮上限 MEMO_RD_ROUND_LIMIT、全程上限 MEMO_RD_TOTAL_LIMIT）
             # 但如果已经有有效的 SAY 内容，优先输出，不强制中断
             if (control.round_recall_count > MEMO_RD_ROUND_LIMIT or state.recall_count > MEMO_RD_TOTAL_LIMIT) and not state.has_output:
-                state.output_content = "[提示] 记忆检索次数过多，已停止检索。"
-                _auto_log("[警告] MEMO_RD 次数超限且无有效 SAY，使用占位符", level=logging.WARNING)
+                state.output_content = "[提示] 检索次数过多，已停止检索。"
+                _auto_log("[警告] 检索次数超限且无有效 SAY，使用占位符", level=logging.WARNING)
                 break
             elif control.round_recall_count > MEMO_RD_ROUND_LIMIT or state.recall_count > MEMO_RD_TOTAL_LIMIT:
-                _auto_log("[警告] MEMO_RD 次数超限，但已有 SAY 内容，继续输出", level=logging.WARNING)
+                _auto_log("[警告] 检索次数超限，但已有 SAY 内容，继续输出", level=logging.WARNING)
                 # 不设置 state.output_content，让后续逻辑处理已有的 SAY
 
             # 【新增】统一注入判定（注入层事件通道）：
@@ -2506,7 +2523,7 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         try:
             probe_payload = {
                 "model": self.llm.model,
-                "input": "【系统：唤醒。】",
+                "input": "【系统：唤醒，仅回复“OK”即可。】",
                 "temperature": 0.0,
                 "max_tokens": 1,
                 "stream": False,

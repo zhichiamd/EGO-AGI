@@ -3,7 +3,7 @@
 
 注入层职责：承载所有"需要 LLM 感知"的事件，供 EGO 循环每轮消费。
 事件源：
-- 执行层（同步）：MEMO_RD / NOTE_RD 检索结果、CONTINUE 继续方向、指令失败反馈
+- 执行层（同步）：MEMO_RD / NOTE_RD / WEB_SRCH 检索结果、CONTINUE 继续方向、指令失败反馈
 - 调度层（异步）：备忘录到期触发（NOTE_DUE）
 
 事件属性：
@@ -25,11 +25,12 @@ from dataclasses import dataclass
 
 # 事件来源 → 注入 LLM 的标签（替代原硬编码 MEMO_RD 前缀）
 SOURCE_LABELS = {
-    "MEMO_RD": "记忆检索",
-    "NOTE_RD": "备忘录检索",
-    "CONTINUE": "继续方向",
-    "FEEDBACK": "指令失败反馈",
-    "NOTE_DUE": "备忘录触发",
+    "MEMO_RD": "系统：记忆检索",
+    "NOTE_RD": "系统：备忘录检索",
+    "WEB_SRCH": "系统：联网检索",
+    "CONTINUE": "EGO: 继续方向",
+    "FEEDBACK": "系统：指令失败反馈",
+    "NOTE_DUE": "系统：备忘录触发",
 }
 
 

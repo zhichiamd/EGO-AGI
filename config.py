@@ -1,5 +1,5 @@
 """
-EGO AGI 全局配置
+EGO Agent 全局配置
 """
 
 import os
@@ -72,6 +72,28 @@ OLLAMA_EMBED_MODEL = os.getenv("EGO_OLLAMA_EMBED_MODEL", "bge-m3")
 # Ollama 模型检测 / 嵌入生成 HTTP 超时（秒）
 OLLAMA_DETECT_TIMEOUT = int(os.getenv("EGO_OLLAMA_DETECT_TIMEOUT", "10"))
 OLLAMA_EMBED_TIMEOUT  = int(os.getenv("EGO_OLLAMA_EMBED_TIMEOUT", "60"))
+
+# ── 联网检索配置（WEB_SRCH 指令，Tavily REST 直连）─────────────
+# 未启用 / 未配置 Key / 服务不可达 → 指令返回失败消息并回注 LLM，不影响主流程
+WEB_SRCH_ENABLED  = os.getenv("EGO_WEB_SRCH_ENABLED", "true").lower() == "true"
+# Tavily API Key（为空则指令明确报错，提示用户配置）
+TAVILY_API_KEY    = os.getenv("EGO_TAVILY_API_KEY", "")
+WEB_SRCH_API_BASE = os.getenv("EGO_WEB_SRCH_API_BASE", "https://api.tavily.com/search")
+# 单次返回条数上限（越大注入 token 越多，建议 3~5）
+WEB_SRCH_MAX_RESULTS = int(os.getenv("EGO_WEB_SRCH_MAX_RESULTS", "5"))
+# 检索深度：basic | advanced（advanced 更准但更慢/更耗配额）
+WEB_SRCH_SEARCH_DEPTH = os.getenv("EGO_WEB_SRCH_SEARCH_DEPTH", "basic")
+# 是否请求 Tavily 额外生成"综述"（官方 oneOf: false | basic | advanced）
+# false/0/no/off=不生成（默认，省 token 与延迟）；basic=短综述；advanced=详细综述
+# true/1/yes/on 按 basic 处理（避免"写了 true 反而被关闭"的反直觉）；其余非法值回落 false
+WEB_SRCH_INCLUDE_ANSWER = os.getenv("EGO_WEB_SRCH_INCLUDE_ANSWER", "false").strip().lower()
+if WEB_SRCH_INCLUDE_ANSWER in ("true", "1", "yes", "on"):
+    WEB_SRCH_INCLUDE_ANSWER = "basic"
+elif WEB_SRCH_INCLUDE_ANSWER not in ("basic", "advanced"):
+    WEB_SRCH_INCLUDE_ANSWER = False
+WEB_SRCH_TIMEOUT = int(os.getenv("EGO_WEB_SRCH_TIMEOUT", "30"))  # 秒
+# 单条摘要截断长度（控制注入上下文的 token 量）
+WEB_SRCH_SNIPPET_MAX_LENGTH = int(os.getenv("EGO_WEB_SRCH_SNIPPET_MAX_LENGTH", "500"))
 
 # ── API 超时配置（统一管理）─────────────────────────────
 # 模型检测超时时间（秒）- 这个可以短一些
@@ -255,7 +277,7 @@ SESSION_ID_PROBE_TIMEOUT = int(os.getenv("EGO_SESSION_ID_PROBE_TIMEOUT", "300"))
 # Session 重建完成后等待间隔（秒），给 LMStudio 时间整理 KV cache
 SESSION_REBUILD_POST_DELAY = int(os.getenv("EGO_SESSION_REBUILD_POST_DELAY", "120"))
 # ── 循环兜底参数 ──────────────────────────────
-# 单轮/全程 MEMO_RD / NOTE_RD 检索次数上限（超过则停止检索）
+# 单轮/全程检索次数上限（MEMO_RD / NOTE_RD / WEB_SRCH 共用同一预算，超过则停止检索）
 MEMO_RD_ROUND_LIMIT = int(os.getenv("EGO_MEMO_RD_ROUND_LIMIT", "3"))
 MEMO_RD_TOTAL_LIMIT = int(os.getenv("EGO_MEMO_RD_TOTAL_LIMIT", "6"))
 # 连续相似响应达到该次数视为重复循环，强制停止

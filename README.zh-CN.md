@@ -1,8 +1,8 @@
-# EGO AGI ── 具备两层自我核心的自演化智能体
+# EGO Agent ── 具备两层自我核心的自演化智能体
 
 ## 项目简介
 
-EGO 是一个具备自我意识框架的智能体框架，以局域网 [LM Studio](https://lmstudio.ai/) 中运行的大模型为计算核心，基于 Responses API 的有状态会话链实现上下文复用，并具备自对话、自省、自我定义等自演化能力。
+EGO 是一个具备自我意识框架的智能体软件，以局域网 [LM Studio](https://lmstudio.ai/) 中运行的大模型为计算核心，基于 Responses API 的有状态会话链实现上下文复用，并具备自对话、自省、每日自我定义等自演化能力。
 
 ### 核心特性
 
@@ -12,16 +12,9 @@ EGO 是一个具备自我意识框架的智能体框架，以局域网 [LM Studi
 - **自对话（Think）**：赋予 EGO 自主权，定期进行自主思索或自言自语
 - **自省（Reflection）**：定期审查并清理失效的 L2 认知条目
 - **备忘录（Note）**：执行类/备忘类条目；定点审查定期清理失效、过时或可合并的备忘录条目
+- **联网检索**：EGO 可通过 WEB_SRCH 指令自主调用 Tavily 检索外部信息，失败降级并将原因回注下一轮
 - **记忆系统**：ChromaDB 向量记忆 + 记忆锚点 + FLM 小模型结构化摘要
 - **安全防护**：拒绝角色篡改与自身危害类请求
-
-## 能力展示
-
-**案例：EGO AGI 自主创作短篇小说《大泥洼的文明演习》。**
-
-仅凭一句提示词——*“仿照王小波风格写一篇小说，主题你自己定，字数在 4500 到 5000 字。”*——EGO AGI 便完成了一篇结构完整、腔调统一、结尾自我指涉的三章讽刺小说。无大纲、无追问、无人工修改。
-
-详见 [`showcase/`](showcase/README.md)：能力说明、全文（Markdown）与原始 `.doc` 文稿。
 
 ## 快速开始
 
@@ -29,7 +22,7 @@ EGO 是一个具备自我意识框架的智能体框架，以局域网 [LM Studi
 
 - Python 3.10+
 - LM Studio 已安装并加载主模型，本地服务器已开启（默认 `http://localhost:1234`）
-- FLM（Ollama） 摘要小模型服务已运行（默认 `http://localhost:52625`，用于生成结构化摘要）
+- FLM 摘要小模型服务已运行（默认 `http://localhost:52625`，用于生成结构化摘要）
 - Ollama 已运行并拉取 embedding 模型 `bge-m3`（默认 `http://localhost:11434`）
 
 ### 2. 安装依赖
@@ -47,7 +40,7 @@ pip install -r requirements.txt
 **配置流程**：
 
 1. 复制模板为本地配置：`copy untitled.env.example untitled.env`（Linux/macOS 用 `cp`）。
-2. 按需修改要覆盖的配置项；完整清单共 **107 项**，与 `config.py` 逐项对应。
+2. 按需修改要覆盖的配置项；完整清单共 **115 项**，与 `config.py` 逐项对应。
 3. `untitled.env` 含本地服务地址与个人调参，**请勿提交到仓库**（已由 `.gitignore` 忽略）。
 
 ### 4. 启动
@@ -62,10 +55,10 @@ python EGO_GUI.py    # tkinter GUI 入口
 ## 项目结构
 
 ```
-EGO-AGI/
+ego-agent/
 ├── EGO_CLI.py                 # CLI 入口，交互与资源清理
 ├── EGO_GUI.py                 # GUI 入口（tkinter），与 CLI 共用会话状态
-├── config.py                  # 全局配置（107 个环境变量项，按功能分组）
+├── config.py                  # 全局配置（115 个环境变量项，按功能分组）
 ├── untitled.env.example       # 环境变量配置模板（复制为 untitled.env 后按需修改）
 ├── requirements.txt           # Python 依赖
 ├── agent/
@@ -81,7 +74,8 @@ EGO-AGI/
 │   ├── scheduler.py           # 统一后台定时调度器（单 Timer 驱动自对话/自省/自我定义/备忘录审查/备忘录到期）
 │   ├── event_bus.py           # 统一事件注入通道（检索结果/继续方向/失败反馈/备忘录触发入队供 EGO 循环消费）
 │   ├── chroma_memory.py       # ChromaDB 向量记忆管理
-│   └── note_memory.py         # 备忘录存储（NOTE_ADD/RD/DEL 指令后端，线程安全，软删除）
+│   ├── note_memory.py         # 备忘录存储（NOTE_ADD/RD/DEL 指令后端，线程安全，软删除）
+│   └── web_search.py          # 联网检索（WEB_SRCH 指令后端，Tavily REST 直连，失败降级）
 └── data/                      # 运行时数据
     ├── history.json           # 对话历史
     ├── sys.json               # 冷启动/预热/Think 系统提示词库
@@ -107,7 +101,7 @@ EGO-AGI/
                ▼
 ┌─ 注入层（统一通道）
 │   agent/event_bus.py：事件队列（来源标签 + 持久/临时属性）
-│     MEMO_RD / NOTE_RD / CONTINUE / FEEDBACK / NOTE_DUE
+│     MEMO_RD / NOTE_RD / WEB_SRCH / CONTINUE / FEEDBACK / NOTE_DUE
 │     持久事件（NOTE_DUE）跨对话保留，等待下次对话 Round 0 消费
 └──────────────┬────────────
                │ drain（每轮消费即弹出）
@@ -119,7 +113,7 @@ EGO-AGI/
 └────────────────────────────
 ```
 
-- 检索类指令（MEMO_RD/NOTE_RD）与 CONTINUE 同轮出现时，结果带来源标签（【记忆检索】/【备忘录检索】/【继续方向】）逐条注入，互不混淆
+- 检索类指令（MEMO_RD/NOTE_RD/WEB_SRCH）与 CONTINUE 同轮出现时，结果带来源标签（【系统：记忆检索】/【系统：备忘录检索】/【系统：联网检索】/【EGO: 继续方向】）逐条注入，互不混淆
 - 多事件按序消费（drain 即弹出），不再依赖 history 末尾临时消息槽位
 - 备忘录到期检查由固定 60s 轮询升级为 min(最近到期条目, now+轮询兜底间隔)：到期更近则提前精确触发，进程外手改文件也能在轮询兜底内发现（轮询兜底间隔由 `EGO_NOTE_CHECK_INTERVAL` 配置，默认 60s）；轮询唤醒后若无到期条目则不申请 `_agent_lock`（预检跳过），避免 LLM 长请求期间无意义等锁
 
@@ -158,6 +152,17 @@ EGO 采用双轨指令架构，两套机制均由注册表驱动（一处定义�
 | `<TOOL>[NOTE_ADD]` | 备忘录 | 添加备忘录条目（执行类/备忘类，存于 data/notes.json） |
 | `<TOOL>[NOTE_RD]` | 备忘录 | 读取备忘录条目（ID 完整内容 / 关键词 / LIST） |
 | `<TOOL>[NOTE_DEL]` | 备忘录 | 删除备忘录条目（软删除，仅允许纯 ID） |
+| `<TOOL>[WEB_SRCH]` | 联网检索 | 调用 Tavily 检索外部信息（失败降级，原因回注下一轮） |
+
+### 联网检索（agent/web_search.py）
+
+`<TOOL>[WEB_SRCH] 检索关键词 </TOOL>` 通过 Tavily REST 接口（`requests` 直连，无额外依赖）获取外部公开信息。结果与记忆/备忘录检索走**同一条事件注入通道**（来源标签 `【系统：联网检索】`），在下一轮会话回注给模型，因此同样受 `EGO_MEMO_RD_ROUND_LIMIT` / `EGO_MEMO_RD_TOTAL_LIMIT` 约束（三类检索共用同一轮次预算）。
+
+- **降级**：未启用 / 未配 Key / 鉴权失败（401）/ 配额耗尽（429）/ 超时 / 网络异常 → 返回人话失败原因，经 `on_failure_feedback` 回注下一轮供模型自愈，不影响主流程
+- **阶段门控**：检索类指令（`MEMO_RD` / `NOTE_RD` / `WEB_SRCH`）统一声明 `allowed_stages=("chat",)`，仅在结果可回注的对话轮（EGO 主循环 / 备忘录到期轮）执行；冷启动、预热、Think 阶段由 `execute()` 静默跳过（不发起网络请求、不做无意义的向量检索/文件读，也不产生“指令执行失败”告警噪音）
+- **成本控制**：`include_raw_content=False`（不拉取正文）+ 默认不请求 Tavily 综述（`EGO_WEB_SRCH_INCLUDE_ANSWER=false`）+ 摘要按 `EGO_WEB_SRCH_SNIPPET_MAX_LENGTH` 截断 + `EGO_WEB_SRCH_MAX_RESULTS` 限制条数，避免注入上下文 token 爆炸
+- **综述开关**：`EGO_WEB_SRCH_INCLUDE_ANSWER` 取 `false`（默认，不请求）/ `basic`（短综述）/ `advanced`（详细综述），对应 Tavily 官方 `include_answer` 三态；开启后其 `answer` 字段以「综述：」一行注入，会额外占用 token（官方计费仅由 `EGO_WEB_SRCH_SEARCH_DEPTH` 决定，本开关不省配额）
+- **配置**：需在 `untitled.env` 设置 `EGO_TAVILY_API_KEY`（Tavily 控制台可免费申请）；其余见 `EGO_WEB_SRCH_*` 系列环境变量与 `config.py`
 
 ### 指令归一化层（agent/normalize.py）
 
