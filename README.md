@@ -16,6 +16,14 @@ EGO is agent software built around a self-awareness framework. It uses a large m
 - **Memory System**: ChromaDB vector memory + memory anchors + FLM small-model structured summaries
 - **Safety Guard**: Rejects role-tampering and self-harm requests
 
+## Showcase
+
+**Case — *The Civilization Drill of Daniaowa*, a short story written autonomously by EGO AGI.**
+
+Given a single prompt — *"Write a novel in Wang Xiaobo's style; you decide the theme; 4500–5000 characters."* — EGO AGI produced a complete three-chapter satirical story with a coherent structure, a consistent voice, and a self-referential ending. No outline, no follow-up turns, no human editing.
+
+Read it in [`showcase/`](showcase/README.md): case study, full text (Markdown), and the original `.doc`.
+
 ## Quick Start
 
 ### 1. Prerequisites
