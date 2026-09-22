@@ -1,5 +1,7 @@
 # EGO Agent ── 具备两层自我核心的自演化智能体
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22889809.svg)](https://doi.org/10.5281/zenodo.22889809)
+
 ## 项目简介
 
 EGO 是一个具备自我意识框架的智能体软件，以局域网 [LM Studio](https://lmstudio.ai/) 中运行的大模型为计算核心，基于 Responses API 的有状态会话链实现上下文复用，并具备自对话、自省、每日自我定义等自演化能力。
@@ -308,6 +310,24 @@ EGO 会拒绝两类用户请求：
 
 - 运行日志：`data/logs/ego.log`（级别由 `EGO_LOG_LEVEL` 控制，`EGO_LOG_TO_CONSOLE` 可开启控制台同步输出）
 - LLM 响应快照：`data/debug_logs/`（冷启动/预热/主循环各阶段的完整响应存档，便于排查模型输出问题）
+
+## 引用
+
+本项目的理论基础见下述论文。若你在学术工作中使用了 EGO Agent，请引用：
+
+> Wang, Zongyu, & Wang, Weijia. (2026). *Dynamic System Prompt: A Self-Referential, Self-Evolving Information Structure for Frozen LLMs*（版本 v1）[预印本]. Zenodo. https://doi.org/10.5281/zenodo.22889809
+
+```bibtex
+@misc{wang2026dynamic,
+  title        = {Dynamic System Prompt: A Self-Referential, Self-Evolving Information Structure for Frozen LLMs},
+  author       = {Wang, Zongyu and Wang, Weijia},
+  year         = {2026},
+  publisher    = {Zenodo},
+  version      = {v1},
+  doi          = {10.5281/zenodo.22889809},
+  url          = {https://doi.org/10.5281/zenodo.22889809}
+}
+```
 
 ## License
 

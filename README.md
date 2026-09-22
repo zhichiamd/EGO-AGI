@@ -1,5 +1,7 @@
 # EGO Agent ── A Self-Evolving Agent with a Two-Layer Self Core
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.22889809.svg)](https://doi.org/10.5281/zenodo.22889809)
+
 ## Introduction
 
 EGO is agent software built around a self-awareness framework. It uses a large model running in a LAN-hosted [LM Studio](https://lmstudio.ai/) as its computational core, reuses context through a stateful session chain based on the Responses API, and provides self-evolution capabilities such as self-dialogue, introspection, and daily self-definition.
@@ -308,6 +310,24 @@ User input is passed directly to the LLM; EGO's internal thoughts (`<THINK>`) ar
 
 - Runtime log: `data/logs/ego.log` (level controlled by `EGO_LOG_LEVEL`; `EGO_LOG_TO_CONSOLE` enables synchronized console output)
 - LLM response snapshots: `data/debug_logs/` (full response archives for each stage of coldstart/preheat/main loop, for troubleshooting model output issues)
+
+## Citation
+
+The theoretical foundation of this project is described in the following paper. If you use EGO Agent in academic work, please cite it:
+
+> Wang, Zongyu, & Wang, Weijia. (2026). *Dynamic System Prompt: A Self-Referential, Self-Evolving Information Structure for Frozen LLMs* (Version v1) [Preprint]. Zenodo. https://doi.org/10.5281/zenodo.22889809
+
+```bibtex
+@misc{wang2026dynamic,
+  title        = {Dynamic System Prompt: A Self-Referential, Self-Evolving Information Structure for Frozen LLMs},
+  author       = {Wang, Zongyu and Wang, Weijia},
+  year         = {2026},
+  publisher    = {Zenodo},
+  version      = {v1},
+  doi          = {10.5281/zenodo.22889809},
+  url          = {https://doi.org/10.5281/zenodo.22889809}
+}
+```
 
 ## License
 

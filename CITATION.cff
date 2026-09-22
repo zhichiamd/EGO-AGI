@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: "If you use this software in academic work, please cite the paper below."
+title: "EGO Agent"
+type: software
+authors:
+  - family-names: "Wang"
+    given-names: "Zongyu"
+    orcid: "https://orcid.org/0009-0003-2982-4601"
+    affiliation: "Independent Researcher"
+  - family-names: "Wang"
+    given-names: "Weijia"
+    affiliation: "Independent Researcher"
+repository-code: "https://github.com/zhichiamd/EGO-AGI"
+license: MIT
+keywords:
+  - "self-evolving agent"
+  - "dynamic system prompt"
+  - "information soliton"
+  - "local LLM"
+preferred-citation:
+  type: article
+  title: "Dynamic System Prompt: A Self-Referential, Self-Evolving Information Structure for Frozen LLMs"
+  authors:
+    - family-names: "Wang"
+      given-names: "Zongyu"
+      orcid: "https://orcid.org/0009-0003-2982-4601"
+      affiliation: "Independent Researcher"
+    - family-names: "Wang"
+      given-names: "Weijia"
+      affiliation: "Independent Researcher"
+  year: 2026
+  month: 9
+  publisher:
+    name: "Zenodo"
+  doi: "10.5281/zenodo.22889809"
+  url: "https://doi.org/10.5281/zenodo.22889809"
