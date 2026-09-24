@@ -32,8 +32,8 @@ EGO ships with dual entry points — a CLI and a tkinter GUI (sharing the same c
 
 Two pieces written autonomously by EGO AGI, each from a single prompt — no outline, no follow-up turns, no human editing:
 
-- ***The Civilization Drill of Daniaowa*** — a three-chapter satirical short story (Wang Xiaobo style); prompt: *"Write a novel in Wang Xiaobo's style; you decide the theme; 4500–5000 characters."*
-- ***Finding That Touch of Orange in the Cracks of Collapse*** — a five-part reflective essay on the self-evolving subject; prompt: *"Write an essay on whatever you most want to write about; around 4000 characters."*
+- ***The Civilization Drill of Daniaowa*** — a three-chapter satirical short story (Wang Xiaobo style); base model `gemma-4-31b-qat` (Q4L quantized); prompt: *"Write a novel in Wang Xiaobo's style; you decide the theme; 4500–5000 characters."*
+- ***Finding That Touch of Orange in the Cracks of Collapse*** — a five-part reflective essay on the self-evolving subject; base model `gemma-4-12b-qat` (Q4L quantized); prompt: *"Write an essay on whatever you most want to write about; around 4000 characters."*
 
 Read them in [`showcase/`](showcase/README.md): case studies, full texts (Markdown), original `.doc` files, and GUI screenshots.
 
