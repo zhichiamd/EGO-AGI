@@ -18,6 +18,16 @@ EGO is agent software built around a self-awareness framework. It uses a large m
 - **Memory System**: ChromaDB vector memory + memory anchors + FLM small-model structured summaries
 - **Safety Guard**: Rejects role-tampering and self-harm requests
 
+## Screenshots
+
+EGO ships with dual entry points — a CLI and a tkinter GUI (sharing the same configuration and session state). Below are screenshots of the GUI in action:
+
+![EGO GUI: autonomously generating the essay from a single prompt (preface ~ Chapter 3)](showcase/EGO_1.jpg)
+
+![EGO GUI: generation continues (Chapters 4 ~ final) and a follow-up question in the same session](showcase/EGO_2.jpg)
+
+![EGO GUI: a metacognitive answer to the question "does an LLM truly understand?"](showcase/EGO_3.jpg)
+
 ## Showcase
 
 Two pieces written autonomously by EGO AGI, each from a single prompt — no outline, no follow-up turns, no human editing:
