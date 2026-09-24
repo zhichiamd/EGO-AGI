@@ -42,7 +42,7 @@ Read them in [`showcase/`](showcase/README.md): case studies, full texts (Markdo
 ### 1. Prerequisites
 
 - Python 3.10+
-- LM Studio installed with the main model loaded and the local server running (default `http://localhost:1234`)
+- LM Studio installed with the main model loaded and the local server running (default `http://localhost:1234`). **Recommended main model: `gemma-4-31b`; on lower-spec machines, use `gemma-4-12b-qat` (Q4L quantized).**
 - FLM summarization small-model service running (default `http://localhost:52625`, used to generate structured summaries)
 - Ollama running with the embedding model `bge-m3` pulled (default `http://localhost:11434`)
 

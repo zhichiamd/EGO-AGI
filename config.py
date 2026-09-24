@@ -34,6 +34,7 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # ── LMStudio 对话模型配置 ──────────────────────────────
+# 主模型推荐：gemma-4-31b；若计算机性能较差，可使用 gemma-4-12b-qat（Q4L 量化）
 LM_API_BASE      = os.getenv("EGO_LM_API_BASE", "http://localhost:1234/v1")
 LM_MODEL         = os.getenv("EGO_LM_MODEL", "default-model")
 

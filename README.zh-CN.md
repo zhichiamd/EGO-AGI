@@ -42,7 +42,7 @@ EGO 提供 CLI 与 tkinter GUI 双入口（共用同一套配置与会话状态�
 ### 1. 前置条件
 
 - Python 3.10+
-- LM Studio 已安装并加载主模型，本地服务器已开启（默认 `http://localhost:1234`）
+- LM Studio 已安装并加载主模型，本地服务器已开启（默认 `http://localhost:1234`）。**主模型推荐 `gemma-4-31b`；若计算机性能较差，可使用 `gemma-4-12b-qat`（Q4L 量化）。**
 - FLM 摘要小模型服务已运行（默认 `http://localhost:52625`，用于生成结构化摘要）
 - Ollama 已运行并拉取 embedding 模型 `bge-m3`（默认 `http://localhost:11434`）
 
