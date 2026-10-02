@@ -15,7 +15,7 @@ EGO is agent software built around a self-awareness framework. It uses a large m
 - **Introspection (Reflection)**: Periodically reviews and cleans up invalid L2 cognitive entries
 - **Notes (Note)**: Action/memo entries; point-in-time reviews periodically clean up invalid, outdated, or mergeable note entries
 - **Web Search**: EGO can autonomously call Tavily via the WEB_SRCH instruction to retrieve external information, degrading gracefully and feeding the failure reason back into the next round
-- **Memory System**: ChromaDB vector memory + memory anchors + FLM small-model structured summaries
+- **Memory System**: ChromaDB vector memory + memory anchors + Ollama small-model structured summaries
 - **Safety Guard**: Rejects role-tampering and self-harm requests
 
 ## Screenshots
@@ -42,9 +42,10 @@ Read them in [`showcase/`](showcase/README.md): case studies, full texts (Markdo
 ### 1. Prerequisites
 
 - Python 3.10+
-- LM Studio installed with the main model loaded and the local server running (default `http://localhost:1234`). **Recommended main model: `gemma-4-31b`; on lower-spec machines, use `gemma-4-12b-qat` (Q4L quantized).**
-- FLM summarization small-model service running (default `http://localhost:52625`, used to generate structured summaries)
-- Ollama running with the embedding model `bge-m3` pulled (default `http://localhost:11434`)
+- LM Studio installed with the main model loaded and the local server running (default `http://localhost:1234`). **Recommended main model: `gemma-4-31b` (Q4 quantized) or `Qwen-3.8-27b` (Q4 quantized).**
+- Ollama running (default `http://localhost:11434`) with these models pulled: the embedding model `bge-m3`, and the small model shared by summarization and instruction normalization (default `gemma4-it:e4b`)
+
+> Deployment needs only **LM Studio + Ollama** (no separate FLM service): Ollama simultaneously handles embedding, structured summarization, and instruction normalization.
 
 ### 2. Install Dependencies
 
@@ -88,7 +89,7 @@ ego-agent/
 │   ├── llm.py                 # LM Studio Responses API client (unified entry chat(), streaming output)
 │   ├── prompts.py             # Two-layer self core management (separated L1 + L2 structure)
 │   ├── instructions.py        # LLM autonomous instruction registry (parsing/execution/priority/protocol, all derived from one place)
-│   ├── normalize.py           # Instruction normalization layer (natural-language payload → standard protocol, FLM small-model translation)
+│   ├── normalize.py           # Instruction normalization layer (natural-language payload → standard protocol, Ollama small-model translation)
 │   ├── tools.py               # Manual command registry (CLI dispatch / GUI menus / help text, all derived from one place)
 │   ├── think_reflection.py    # Self-dialogue / introspection subsystem (Mixin-decoupled, registered with the unified scheduler)
 │   ├── self_definition.py     # Daily self-definition subsystem (Mixin-decoupled, registered with the unified scheduler)
@@ -188,7 +189,7 @@ Triggered automatically when the model embeds XML tags in its reply. The `@regis
 
 ### Instruction Normalization Layer (agent/normalize.py)
 
-Natural-language payloads (e.g. `<NOTE_ADD> remind me of a meeting at 9am tomorrow </NOTE_ADD>`) are translated by the normalization layer using the FLM small model (default `gemma4-it:e4b`) into the standard protocol format (`[Nature: Action] [Trigger time: ...]`), improving the accuracy of structured instruction parsing and reducing the load on the main conversation model.
+Natural-language payloads (e.g. `<NOTE_ADD> remind me of a meeting at 9am tomorrow </NOTE_ADD>`) are translated by the normalization layer using the Ollama small model (default `gemma4-it:e4b`) into the standard protocol format (`[Nature: Action] [Trigger time: ...]`), improving the accuracy of structured instruction parsing and reducing the load on the main conversation model.
 
 - **Idempotent**: Payloads already in the standard protocol format pass through unchanged, without triggering translation
 - **Degradation**: Service unreachable / invalid JSON / field-validation failure → pass the original payload through (behavior = status quo, does not affect instruction execution)
@@ -246,7 +247,7 @@ Borrowing the scheduling pattern of point-in-time introspection, each day at a f
 - **ChromaDB vector memory** (enabled by default): the `objective_memory` collection, using the Ollama `bge-m3` embedding, with retrieval filtered by role and support for metadata-conditional queries
 - **Memory anchors (format_anchors)**: MEMO_RD retrieval results are re-ranked by a composite score (vector similarity × time decay × reference oscillation) and then formatted for output, for the LLM to perceive
 - **Periodic oscillation of memory reference weights**: Reference weights fluctuate periodically with the number of references and decay, preventing old memories from dominating excessively
-- **FLM structured summaries**: The summarization small model (default `gemma4-it:e4b`) generates structured summaries of conversations, used for memory compression
+- **Structured summaries**: The Ollama summarization small model (default `gemma4-it:e4b`) generates structured summaries of conversations, used for memory compression
 
 ## Manual Commands (Slash Commands)
 

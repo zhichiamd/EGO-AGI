@@ -15,7 +15,7 @@ EGO 是一个具备自我意识框架的智能体软件，以局域网 [LM Studi
 - **自省（Reflection）**：定期审查并清理失效的 L2 认知条目
 - **备忘录（Note）**：执行类/备忘类条目；定点审查定期清理失效、过时或可合并的备忘录条目
 - **联网检索**：EGO 可通过 WEB_SRCH 指令自主调用 Tavily 检索外部信息，失败降级并将原因回注下一轮
-- **记忆系统**：ChromaDB 向量记忆 + 记忆锚点 + FLM 小模型结构化摘要
+- **记忆系统**：ChromaDB 向量记忆 + 记忆锚点 + Ollama 小模型结构化摘要
 - **安全防护**：拒绝角色篡改与自身危害类请求
 
 ## 界面展示
@@ -42,9 +42,10 @@ EGO 提供 CLI 与 tkinter GUI 双入口（共用同一套配置与会话状态�
 ### 1. 前置条件
 
 - Python 3.10+
-- LM Studio 已安装并加载主模型，本地服务器已开启（默认 `http://localhost:1234`）。**主模型推荐 `gemma-4-31b`；若计算机性能较差，可使用 `gemma-4-12b-qat`（Q4L 量化）。**
-- FLM 摘要小模型服务已运行（默认 `http://localhost:52625`，用于生成结构化摘要）
-- Ollama 已运行并拉取 embedding 模型 `bge-m3`（默认 `http://localhost:11434`）
+- LM Studio 已安装并加载主模型，本地服务器已开启（默认 `http://localhost:1234`）。**主模型推荐 `gemma-4-31b`（Q4 量化）或 `Qwen-3.8-27b`（Q4 量化）。**
+- Ollama 已运行（默认 `http://localhost:11434`），并已拉取：embedding 模型 `bge-m3`，以及摘要与指令归一化共用的小模型（默认 `gemma4-it:e4b`）
+
+> 部署仅需 **LM Studio + Ollama** 两个本地服务（无需额外的 FLM 服务）：Ollama 同时承担 embedding、结构化摘要与指令归一化三项职责。
 
 ### 2. 安装依赖
 
@@ -88,7 +89,7 @@ ego-agent/
 │   ├── llm.py                 # LM Studio Responses API 客户端（统一入口 chat()，流式输出）
 │   ├── prompts.py             # 两层自我核心管理（L1 + L2 分离结构）
 │   ├── instructions.py        # LLM 自主指令注册表（解析/执行/优先级/协议全链路派生）
-│   ├── normalize.py           # 指令归一化层（自然语言 payload → 标准协议，FLM 小模型转译）
+│   ├── normalize.py           # 指令归一化层（自然语言 payload → 标准协议，Ollama 小模型转译）
 │   ├── tools.py               # 手动命令注册表（CLI 分发/GUI 菜单/帮助文本全链路派生）
 │   ├── think_reflection.py    # 自对话/自省子系统（Mixin 解耦，统一调度器注册）
 │   ├── self_definition.py     # 每日自我定义子系统（Mixin 解耦，统一调度器注册）
@@ -188,7 +189,7 @@ EGO 采用双轨指令架构，两套机制均由注册表驱动（一处定义�
 
 ### 指令归一化层（agent/normalize.py）
 
-自然语言形式的 payload（如 `<NOTE_ADD> 明早9点提醒我开会 </NOTE_ADD>`）由归一化层调用 FLM 小模型（默认 `gemma4-it:e4b`）转译为标准协议格式（`[性质：执行] [触发时间：...]`），以提升结构化指令解析的准确率并降低对话主模型的负载。
+自然语言形式的 payload（如 `<NOTE_ADD> 明早9点提醒我开会 </NOTE_ADD>`）由归一化层调用 Ollama 小模型（默认 `gemma4-it:e4b`）转译为标准协议格式（`[性质：执行] [触发时间：...]`），以提升结构化指令解析的准确率并降低对话主模型的负载。
 
 - **幂等**：已是标准协议格式的 payload 直接透传，不触发转译
 - **降级**：服务不可达 / JSON 无效 / 字段校验失败 → 透传原 payload（行为=现状，不影响指令执行）
@@ -246,7 +247,7 @@ Think 在后台线程中执行，复用 EGO 主循环与 `EGO_MAX_ROUNDS` 轮次
 - **ChromaDB 向量记忆**（默认启用）：`objective_memory` 集合，使用 Ollama `bge-m3` embedding，检索按角色过滤，支持元数据条件查询
 - **记忆锚点（format_anchors）**：MEMO_RD 检索结果经综合评分（向量相似度 × 时间衰减 × 引用震荡）重排序后格式化输出，供 LLM 感知
 - **记忆引用权重周期震荡**：引用权重随引用次数周期性波动并衰减，避免旧记忆过度主导
-- **FLM 结构化摘要**：由摘要小模型（默认 `gemma4-it:e4b`）生成对话的结构化摘要，用于记忆压缩
+- **结构化摘要**：由 Ollama 摘要小模型（默认 `gemma4-it:e4b`）生成对话的结构化摘要，用于记忆压缩
 
 ## 手动命令（斜杠命令）
 

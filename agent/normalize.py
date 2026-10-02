@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-指令归一化层：将自然语言 payload 转译为标准协议文本（FLM e4b，失败透传）
+指令归一化层：将自然语言 payload 转译为标准协议文本（Ollama 小模型，失败透传）
 
 设计要点：
 - 幂等：looks_standard() 判定已是标准协议格式的 payload 直接透传，不触发转译
@@ -172,7 +172,7 @@ _FILLERS = {
 
 # ── 转译：自然语言 payload → 标准协议文本（None = 透传原样）────
 def translate(kind: str, payload: str) -> str:
-    """调用 FLM e4b 将自然语言 payload 转译为标准协议文本；失败返回 None"""
+    """调用 Ollama 小模型将自然语言 payload 转译为标准协议文本；失败返回 None"""
     if not NORM_ENABLED:
         return None
     if _circuit_open():

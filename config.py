@@ -34,26 +34,26 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # ── LMStudio 对话模型配置 ──────────────────────────────
-# 主模型推荐：gemma-4-31b；若计算机性能较差，可使用 gemma-4-12b-qat（Q4L 量化）
+# 主模型推荐：gemma-4-31b（Q4 量化）或 Qwen-3.8-27b（Q4 量化）
 LM_API_BASE      = os.getenv("EGO_LM_API_BASE", "http://localhost:1234/v1")
 LM_MODEL         = os.getenv("EGO_LM_MODEL", "default-model")
 
-# ── FLM 摘要模型配置 ──────────────────────────────
-FLM_API_BASE     = os.getenv("EGO_FLM_API_BASE", "http://localhost:52625/v1")
+# ── 摘要模型配置（Ollama）──────────────────────────────
+FLM_API_BASE     = os.getenv("EGO_FLM_API_BASE", "http://localhost:11434/v1")
 FLM_MODEL        = os.getenv("EGO_FLM_MODEL", "gemma4-it:e4b")
 
 FLM_SUMMARY_TEMPERATURE = float(os.getenv("EGO_FLM_SUMMARY_TEMPERATURE", "0.5"))
 #FLM_SUMMARY_MAX_TOKENS  = int(os.getenv("EGO_FLM_SUMMARY_MAX_TOKENS", "512"))
 FLM_SUMMARY_MAX_TOKENS  = int(os.getenv("EGO_FLM_SUMMARY_MAX_TOKENS", "1024"))
 FLM_SUMMARY_TIMEOUT     = int(os.getenv("EGO_FLM_SUMMARY_TIMEOUT", "120"))  # 秒
-# 会话记录超过该字符数时先用 FLM 摘要再入库
+# 会话记录超过该字符数时先用摘要小模型压缩再入库
 FLM_SUMMARY_TRIGGER_LENGTH = int(os.getenv("EGO_FLM_SUMMARY_TRIGGER_LENGTH", "1000"))
-# FLM 摘要目标字符数
+# 摘要目标字符数
 FLM_SUMMARY_TARGET_LENGTH = int(os.getenv("EGO_FLM_SUMMARY_TARGET_LENGTH", "600"))
 
-# ── 指令归一化层配置（FLM e4b 转译自然语言 payload → 标准协议，失败透传）────────
+# ── 指令归一化层配置（Ollama 小模型转译自然语言 payload → 标准协议，失败透传）────────
 NORM_ENABLED = os.getenv("EGO_NORM_ENABLED", "true").lower() == "true"
-NORM_API_BASE = os.getenv("EGO_NORM_API_BASE", "http://localhost:52625/v1")
+NORM_API_BASE = os.getenv("EGO_NORM_API_BASE", "http://localhost:11434/v1")
 NORM_MODEL = os.getenv("EGO_NORM_MODEL", "gemma4-it:e4b")
 
 NORM_TEMPERATURE = float(os.getenv("EGO_NORM_TEMPERATURE", "0.0"))
@@ -63,7 +63,7 @@ NORM_TIMEOUT = int(os.getenv("EGO_NORM_TIMEOUT", "60"))  # 秒；实测 NOTE_ADD
 # 幂等判定：短于该长度的 MEMO_RD payload 视为已归一化的关键词（如“健身计划”），直接透传；
 # NOTE_RD 不做短词直通（note.search 为纯子串匹配，自然语言短句直通必然失配）
 NORM_MIN_LENGTH = int(os.getenv("EGO_NORM_MIN_LENGTH", "6"))
-# 连续失败熔断：超过该次数则冷却 NORM_CIRCUIT_COOLDOWN 秒跳过转译（防 52625 挂起拖慢对话）
+# 连续失败熔断：超过该次数则冷却 NORM_CIRCUIT_COOLDOWN 秒跳过转译（防归一化服务挂起拖慢对话）
 NORM_CIRCUIT_BREAK = int(os.getenv("EGO_NORM_CIRCUIT_BREAK", "3"))
 NORM_CIRCUIT_COOLDOWN = int(os.getenv("EGO_NORM_CIRCUIT_COOLDOWN", "300"))
 

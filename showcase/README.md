@@ -99,5 +99,5 @@
 
 ## 复现说明
 
-- 运行环境见仓库根目录 [`README.md`](../README.md)：本地 LM Studio 主模型 + Ollama/FLM 摘要小模型。
+- 运行环境见仓库根目录 [`README.md`](../README.md)：本地 LM Studio 主模型 + Ollama（embedding / 摘要 / 指令归一化）。
 - 复现方式：向 EGO AGI 输入上述任一提示词即可。
