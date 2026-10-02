@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
 import traceback
 from datetime import datetime, timedelta
 
-from agent.instructions import parse_instructions, get_instruction, filter_empty_payload
-from agent.llm import add_timestamps
+from agent.instructions import parse_instructions, filter_empty_payload
+from agent.llm import add_timestamps, is_llm_error
 from config import (
     TEMPERATURE_THINK,
     TEMPERATURE_REFLECTION,
@@ -303,11 +304,30 @@ class ThinkReflectionMixin:
         finally:
             self._agent_lock.release()
 
+    def _execute_think_background(self) -> None:
+        """
+        【新增】对话轮次触发的 Think 改为后台线程执行，不再阻塞当轮用户回复。
+
+        复用 run_think_cycle 的独立加锁入口：后台线程等待 _agent_lock（当前对话
+        结束释放后）再执行；等待超时则本次 Think 顺延到下个触发周期。
+        """
+        _auto_log("[Think] 后台自对话启动，等待锁释放...")
+        if not self.run_think_cycle():
+            _auto_log(
+                f"[Think] ⚠ 等待锁 {LOCK_ACQUIRE_TIMEOUT}s 超时，跳过本次自对话（将在下个触发周期重试）",
+                level=logging.WARNING,
+            )
+
     def _execute_think_cycle(self):
         """
         执行定时自对话（Think 阶段）
-        
+
         在与用户进行 N 轮对话后触发
+
+        【重构】每个 Think 步骤改为一次完整 EGO 循环（复用 _run_ego_loop），与用户
+        对话同构：所有指令正常执行（含 MEMO_RD/NOTE_RD/WEB_SRCH 检索类、CONTINUE、
+        COG_ADD/COG_DEL/NOTE_ADD），检索结果经事件通道回注下一轮继续推理；
+        步骤产生的 SAY 输出定稿后经 on_think_output 推送 GUI/CLI 显示。
         """
         think_prompts = self.sys_prompts.get("Think", {})
         if not think_prompts:
@@ -325,50 +345,49 @@ class ThinkReflectionMixin:
             _auto_log(f"[Think] [{i}/{len(sorted_keys)}] 执行: {prompt[:50]}{'...' if len(prompt) > 50 else ''}")
             
             try:
-                # 【优化】Think 阶段使用增量消息（session 已维护完整上下文）
-                messages = [
-                #    {"role": "system", "content": self.pm.build_system_prompt()},
-                    {"role": "user", "content": prompt}
-                ]
-                add_timestamps(messages)  # 统一附加当前时间戳（增量消息）
-                
-                response = self.llm.chat(messages, TEMPERATURE_THINK, stage="Think-Step-"+str(i))
+                # 【重构】复用完整 EGO 循环：检索类放行 + 结果回注 + 多轮 CONTINUE；
+                # 显式传入 TEMPERATURE_THINK，避免被 _run_ego_loop 的 self.llm.temperature
+                # （EGO_TEMPERATURE）覆盖，确保 EGO_TEMPERATURE_THINK 配置持续生效
+                state = self._run_ego_loop(
+                    user_input=prompt,
+                    images=None,
+                    start_time=time.time(),
+                    stage="think",
+                    base_temperature_override=TEMPERATURE_THINK,
+                    step=i,
+                )
                 self._touch_llm_activity()  # 记录本次服务端活动，刷新空闲判定
 
-                # 【新增】保存 Think 阶段的 LLM 响应到 debug log
-                self._save_llm_debug_log(response, round_num=-1, stage="think", step=i)
-                
-                # 解析并执行指令（空载荷指令整条跳过）
-                instructions = filter_empty_payload(parse_instructions(response))
-                executed_any = False
-                
-                for instr in instructions:
-                    # 【注册表驱动】仅执行 executable=True 的指令（COG_ADD/COG_DEL/MEMO_RD）；
-                    # THINK（标记）/ CONTINUE（流控制）/ SAY（输出）不在此阶段执行
-                    spec = get_instruction(instr.kind)
-                    if spec is None or not spec.executable:
-                        continue
-                    
-                    # 【新增】设置Think阶段上下文
-                    self.executor.set_context({
-                        "stage": "think",
-                        "step": i,
-                    })
-                    
-                    result = self.executor.execute(instr)
-                    if result.skipped:
-                        continue  # 阶段门控：检索类指令在 Think 阶段不执行，静默跳过
-                    if result.success:
-                        _auto_log(f"[Think]   ✓ 执行指令: {instr.kind}")
-                        executed_any = True
-                    else:
-                        _auto_log(f"[Think]    指令执行失败: {instr.kind}")
-                
-                if not executed_any:
-                    _auto_log("[Think]   ℹ 未检测到可执行指令")
-                
+                # 【新增】仅展示 SAY 产出的有效输出（与用户对话输出同构）；
+                # 无 SAY 时（纯思考/仅执行指令）保持静默，不写历史
+                # 【修复】先过滤 LLM 错误串：_run_ego_loop 遇错会覆写 output_content 但
+                # 不重置 has_output，若某轮已产出 SAY 后再报错，错误串会被误当有效输出
+                # 写入 history（stage=think）并推送界面，故与 note 路径对齐做前置校验
+                if is_llm_error(state.output_content):
+                    _auto_log("[Think]   ✗ LLM 调用失败或返回错误，跳过本步", level=logging.WARNING)
+                    continue
+                if not (state.has_output and state.output_content and state.output_content.strip()):
+                    _auto_log("[Think]   ℹ 本步未产生 SAY 输出")
+                    continue
+
+                output = state.output_content.strip()
+
+                # 【新增】写入历史（stage=think：供会话重建/追溯；客观记忆层按 stage
+                # 过滤，不污染 ChromaDB，也不参与对话计数与自省统计）
+                self._add_to_history_with_stage("user", prompt, stage="think")
+                self._add_to_history_with_stage("assistant", output, stage="think")
+
+                # 【新增】推送 GUI/CLI：与备忘录到期输出同机制（回调由界面挂接）
+                cb = getattr(self, "on_think_output", None)
+                if cb:
+                    try:
+                        cb(output)
+                    except Exception as e:
+                        _auto_log(f"[Think]   ⚠ 输出推送回调失败: {e}", level=logging.WARNING)
+
             except Exception as e:
                 _auto_log(f"[Think]   ✗ 执行失败: {e}", level=logging.WARNING)
+                _auto_log(traceback.format_exc())
                 # 继续执行下一条，不中断整个流程
         
         _auto_log("[Think] ✓ 定时自对话完成\n")

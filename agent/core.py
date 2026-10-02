@@ -167,6 +167,10 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         self.events = EventBus()
         # 【新增】后台自主运行（备忘录到期）输出回调：GUI/CLI 挂接后可实时推送
         self.on_note_output = None  # callable(text) -> None，后台线程调用
+        # 【新增】自对话（Think）SAY 输出回调：GUI/CLI 挂接后实时推送（后台线程调用）
+        self.on_think_output = None  # callable(text) -> None
+        # 【新增】用户回复定稿即回调（就绪即显示）：在自对话等后续阶段之前先推送界面（GUI/CLI 挂接）
+        self.on_chat_output = None  # callable(text) -> None
         self.scheduler = EgoScheduler(
             self,
             lock_acquire_timeout=LOCK_ACQUIRE_TIMEOUT,
@@ -213,6 +217,10 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         
         # 冷启动缓存文件路径
         self.coldstart_cache_file = Path(BASE_DIR) / "data" / "coldstart_cache.json"
+        # 【新增】冷启动/预热提示词与输出缓冲区：仅用于写入 coldstart_cache.json，
+        # 不再写入 history.json（其结晶已体现在 L2，重启重建无需回灌）
+        self._coldstart_msgs: list[dict] = []
+        self._preheat_msgs: list[dict] = []
         
         # 【优化】智能判断是否需要冷启动/预热
         # 如果 L2 认知库已有内容，说明系统已经"觉醒"过，跳过引导阶段直接进入交互
@@ -409,8 +417,9 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                     # 没有 SAY 指令时，使用 strip 后的内容
                     history_content = strip_instructions(response).strip()
                 
-                self._add_to_history_with_stage("user", prompt, stage="preheat")
-                self._add_to_history_with_stage("assistant", history_content, stage="preheat")
+                # 【调整】冷启动/预热内容只写 coldstart_cache.json，不写 history.json
+                self._preheat_msgs.append({"role": "user", "content": prompt})
+                self._preheat_msgs.append({"role": "assistant", "content": history_content})
                 
                 # 执行非 SAY 指令（空载荷指令整条跳过）
                 for instr in filter_empty_payload(instructions):
@@ -536,9 +545,9 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                     # 没有 SAY 指令时，使用 strip 后的内容
                     history_content = strip_instructions(response).strip()
                 
-                # 添加到 history（标记阶段）
-                self._add_to_history_with_stage("user", prompt, stage="coldstart")
-                self._add_to_history_with_stage("assistant", history_content, stage="coldstart")
+                # 【调整】冷启动内容只写 coldstart_cache.json，不写 history.json
+                self._coldstart_msgs.append({"role": "user", "content": prompt})
+                self._coldstart_msgs.append({"role": "assistant", "content": history_content})
                 
                 # 执行非 SAY 指令（空载荷指令整条跳过）
                 for instr in filter_empty_payload(instructions):
@@ -799,6 +808,13 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             self.history = [msg for msg in self.history if not msg.get("temporary", False)]
             _auto_log(f"[信息] 已过滤 {old_temp_count} 条旧版临时消息（已被统一事件队列替代）")
 
+        # 【新增】迁移：冷启动/预热内容不再写入 history（仅存 coldstart_cache.json），
+        # 剔除历史文件中可能残留的该阶段条目，确保重启重建只基于真实对话
+        boot_count = sum(1 for msg in self.history if msg.get("stage") in ("coldstart", "preheat"))
+        if boot_count:
+            self.history = [msg for msg in self.history if msg.get("stage") not in ("coldstart", "preheat")]
+            _auto_log(f"[信息] 已剔除 {boot_count} 条冷启动/预热历史条目（仅保留于 coldstart_cache.json）")
+
     def _save_history(self):
         """
         保存对话历史到文件（带原子写入保护）
@@ -844,7 +860,12 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         if stage == "chat":
             filename = f"llm_response_{timestamp}_{self.debug_log_counter:04d}_round{round_num}.md"
         else:
-            filename = f"llm_response_{stage}_{timestamp}_{self.debug_log_counter:04d}_step{step}.md"
+            # 【新增】EGO 循环类阶段（think/note）附带循环轮次，命名形如
+            # llm_response_think_{ts}_{n:04d}_step{step}_round{round_num}.md；
+            # 非循环阶段（preheat/coldstart/reflection/note-review/selfdef，round_num=-1）
+            # 保持原命名 ..._step{step}.md，避免影响既有日志解析
+            round_suffix = f"_round{round_num}" if round_num >= 0 else ""
+            filename = f"llm_response_{stage}_{timestamp}_{self.debug_log_counter:04d}_step{step}{round_suffix}.md"
         
         filepath = self.debug_log_dir / filename
         
@@ -1133,11 +1154,13 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         if rejection:
             self._add_to_history("user", user_input)
             self._add_to_history("assistant", rejection)
+            self._emit_chat_output(rejection)
             return rejection
 
         # 【新增】重复内容检测：检查最近 3 轮响应
         repetition_error = self._check_recent_repetition()
         if repetition_error:
+            self._emit_chat_output(repetition_error)
             return repetition_error
 
         # 记录用户输入
@@ -1159,7 +1182,12 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         # 【重构】循环结束后的输出定稿（兜底提取 + 清理；沉默路径返回 None）
         output_content = self._finalize_output(state.output_content, state.has_output, state.ego_log)
         if output_content is None:
+            self._emit_chat_output("（EGO 沉默中……）")
             return "（EGO 沉默中……）"
+
+        # 【新增】就绪即显示：在触发自对话（Think）等后续阶段之前，先把定稿回复推送到界面，
+        # 避免回复显示被自对话阶段阻塞（多轮 SAY 仍在本循环内拼接完成后一次性返回）
+        self._emit_chat_output(output_content)
 
         # 【重构】响应后收尾：临时消息清理、写入历史、计数与 Think 调度、保存
         self._post_response(output_content)
@@ -1185,9 +1213,11 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         if len(self.history) < CONSECUTIVE_SIMILAR_MIN_HISTORY:  # 至少需要 3 轮对话（每轮 2 条消息）
             return None
 
+        # 【修复】只统计真实对话输出（排除 think/note 等自主阶段），避免其正常文本
+        # 混入窗口稀释占位符/重复检测的灵敏度
         recent_assistant_messages = [
             msg["content"] for msg in self.history[-CONSECUTIVE_SIMILAR_MIN_HISTORY:]
-            if msg["role"] == "assistant"
+            if msg["role"] == "assistant" and msg.get("stage") in (None, "chat")
         ]
 
         if len(recent_assistant_messages) < 3:
@@ -1321,6 +1351,18 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         output_content = re.sub(r'\n{3,}', '\n\n', output_content)  # 压缩多余空行
         return output_content.strip()
 
+    def _emit_chat_output(self, text: str) -> None:
+        """
+        【新增】用户回复定稿即回调（就绪即显示）：在自对话（Think）等后续阶段之前
+        推送到界面，避免回复被后续阶段阻塞；回调由 GUI/CLI 挂接，未挂接时静默。
+        """
+        cb = getattr(self, "on_chat_output", None)
+        if cb and text:
+            try:
+                cb(text)
+            except Exception as e:
+                _auto_log(f"[警告] 回复推送回调失败: {e}", level=logging.WARNING)
+
     def _post_response(self, output_content: str) -> None:
         """
         【重构】成功响应后的收尾：写入历史 → 更新轮次计数
@@ -1336,11 +1378,13 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         # 【新增】检查是否需要触发 Think（定时自对话）- 在计数器更新后检查
         if self.conversation_counter > 0 and self.conversation_counter % self.THINK_INTERVAL == 0:
             _auto_log(f"\n[调度] 已达到 {self.THINK_INTERVAL} 轮对话，触发 Think 周期")
-            # 【修复】异常保护：Think 周期失败不应影响本轮对话回复的显示
+            # 【修复】改为后台线程执行：Think 复用完整 EGO 循环（EGO_MAX_ROUNDS × 提示词数），
+            # 原同步调用会阻塞当轮用户回复（最长数千秒）；后台线程经 _execute_think_background
+            # 复用 run_think_cycle 的独立加锁入口，待当前对话释放锁后执行，不阻塞回复显示
             try:
-                self._execute_think_cycle()
+                threading.Thread(target=self._execute_think_background, daemon=True).start()
             except Exception as e:
-                _auto_log(f"[警告] Think 周期执行失败: {e}，不影响本轮对话", level=logging.WARNING)
+                _auto_log(f"[警告] Think 后台任务启动失败: {e}，不影响本轮对话", level=logging.WARNING)
 
     def _check_loop_repetition(self, state: _EgoLoopState) -> bool:
         """
@@ -1551,7 +1595,7 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
 
     def _execute_round_instructions(self, state: _EgoLoopState, instructions: list,
                                     round_num: int, user_input: str,
-                                    start_time: float) -> _RoundControl:
+                                    start_time: float, stage: str = "chat") -> _RoundControl:
         """
         【重构】单轮指令执行：去重 → SAY 嵌套指令提取 → 优先级排序 → 依次执行
 
@@ -1628,7 +1672,9 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
 
             # 【新增】在执行指令前设置上下文信息
             self.executor.set_context({
-                "stage": "chat",
+                # 【重构】阶段由调用方透传（chat/think/note），使检索类指令的
+                # allowed_stages 门控名副其实（此前硬编码 "chat"，Think 无法回注）
+                "stage": stage,
                 "round_number": round_num,
                 "user_input": user_input if round_num == 0 else None,
                 "recall_after": start_time,
@@ -1788,7 +1834,9 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             _auto_log(f"[调试] ✗ {instr.kind} 指令执行失败: {result.message}", level=logging.WARNING)
 
     def _run_ego_loop(self, user_input: str, images: list, start_time: float,
-                      stage: str = "chat") -> _EgoLoopState:
+                      stage: str = "chat",
+                      base_temperature_override: float | None = None,
+                      step: int = 0) -> _EgoLoopState:
         """
         【重构】EGO 自我对话循环：多轮调用 LLM 并解析执行指令，
         直至产生 SAY 输出、出错或达到轮数上限。返回循环终态。
@@ -1797,11 +1845,18 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             user_input: 用户输入（round 0 注入；自主触发场景为到期条目提示文本）
             images: 可选图像列表（round 0 使用）
             start_time: 本轮开始时间（MEMO_RD 检索时间过滤基准）
-            stage: 运行阶段标签（"chat"=用户对话；自主触发如 "note" 时
-                   debug log 文件与 LLM stage 标签使用独立命名）
+            stage: 运行阶段标签（"chat"=用户对话；"think"/"note"=自主触发）。
+                   同时作为指令执行的阶段上下文，检索类指令按其 allowed_stages 门控
+            base_temperature_override: 【新增】覆盖温度基准（如 Think 传 TEMPERATURE_THINK）；
+                   None=沿用 self.llm.temperature（用户对话温度）
+            step: 【新增】步骤序号（写入非 chat 阶段 debug 日志文件名，如 Think 的提示词序号）
         """
         state = _EgoLoopState()
-        base_temperature = self.llm.temperature
+        base_temperature = (
+            base_temperature_override
+            if base_temperature_override is not None
+            else self.llm.temperature
+        )
 
         # 【新增】阶段标签前缀：用户对话保持原命名（EGO-Round-N），自主触发使用独立标签
         llm_stage_prefix = "EGO" if stage == "chat" else stage
@@ -1860,8 +1915,8 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                     state.output_content = response
                     break
             
-            # 【新增】保存 LLM 原始响应到 debug log
-            self._save_llm_debug_log(response, round_num, stage=stage)
+            # 【新增】保存 LLM 原始响应到 debug log（step 透传，供 Think 等按提示词序号命名）
+            self._save_llm_debug_log(response, round_num, stage=stage, step=step)
             
             # 【精简】只记录基本调试信息
             _auto_log(f"[调试] LLM 原始响应长度: {len(response)}")
@@ -1890,7 +1945,7 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
 
             # 执行指令
             control = self._execute_round_instructions(
-                state, instructions, round_num, user_input, start_time)
+                state, instructions, round_num, user_input, start_time, stage=stage)
 
             # 【修复】末轮轮尾补检测：轮首检测需要 2 条历史响应，而 MAX_EGO_ROUNDS=2 时
             # round 1 轮首仅 1 条，轮首检测永不触发（MAX_EGO_ROUNDS=4 时最后一对响应同样漏检）。
@@ -2138,27 +2193,18 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             # 【新增】检查是否有旧缓存需要合并（续传场景）
             old_cache = self._load_coldstart_cache() if self.coldstart_cache_file.exists() else None
             
-            # 提取冷启动和预热消息
-            coldstart_msgs = []
-            preheat_msgs = []
+            # 【调整】冷启动/预热内容直接从缓冲区取（history 已不再保存该阶段）
+            coldstart_msgs = [dict(m) for m in getattr(self, "_coldstart_msgs", [])]
+            preheat_msgs = [dict(m) for m in getattr(self, "_preheat_msgs", [])]
             
-            for msg in self.history:
-                if msg.get("stage") == "coldstart":
-                    coldstart_msgs.append({
-                        "role": msg["role"],
-                        "content": msg["content"]  # 完整内容，包括所有指令
-                    })
-                elif msg.get("stage") == "preheat":
-                    preheat_msgs.append({
-                        "role": msg["role"],
-                        "content": msg["content"]
-                    })
-            
-            # 【新增】如果是续传完成，需要合并旧缓存中的消息
-            if old_cache and status == "complete" and old_cache.get("status") == "incomplete":
+            # 【修复】只要旧缓存处于未完成状态（续传场景）即合并其中消息：解耦后冷启动/
+            # 预热内容只存于缓冲区，续传仅把本轮执行的步写入缓冲区，旧缓存中此前已完成
+            # 步骤的消息必须补入，否则续传再次失败时会永久丢失（并与 completed_steps 账实不符）。
+            # 旧缓存为 complete 时不合（避免混入旧 sys.json 版本的残留内容）。
+            if old_cache and old_cache.get("status") == "incomplete":
                 _auto_log("[信息]   检测到续传场景，合并旧缓存消息...")
                 
-                # 合并冷启动消息（旧缓存 + 新history）
+                # 合并冷启动消息（旧缓存 + 新缓冲区，顺序保持：旧的在前）
                 old_coldstart = old_cache.get("coldstart_messages", [])
                 if old_coldstart:
                     # 去重：只保留不在 history 中的旧消息
@@ -2174,15 +2220,14 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                     
                     _auto_log(f"[信息]   - 合并了 {len(msgs_to_insert)} 条旧冷启动消息")
                 
-                # 合并预热消息
+                # 合并预热消息（与冷启动一致：先收集再前置拼接，保持原有顺序）
                 old_preheat = old_cache.get("preheat_messages", [])
                 if old_preheat:
                     existing_contents = {msg["content"] for msg in preheat_msgs}
-                    for old_msg in old_preheat:
-                        if old_msg["content"] not in existing_contents:
-                            preheat_msgs.insert(0, old_msg)
-                    
-                    _auto_log(f"[信息]   - 合并了 {len(old_preheat)} 条旧预热消息")
+                    msgs_to_insert = [old_msg for old_msg in old_preheat if old_msg["content"] not in existing_contents]
+                    if msgs_to_insert:
+                        preheat_msgs = msgs_to_insert + preheat_msgs
+                    _auto_log(f"[信息]   - 合并了 {len(msgs_to_insert)} 条旧预热消息")
             
             # 构建缓存数据
             cache_data = {
@@ -2224,14 +2269,14 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         except Exception as e:
             _auto_log(f"[警告] 保存冷启动缓存失败: {e}", level=logging.WARNING)
     
-    def _build_rebuild_messages(self, cache: dict, include_recent_history: bool = False, include_coldstart: bool = True, history_count: int = None, exclude_current_input: bool = False) -> list[dict]:
+    def _build_rebuild_messages(self, cache: dict, include_recent_history: bool = False, include_coldstart: bool = False, history_count: int = None, exclude_current_input: bool = False) -> list[dict]:
         """
         构建用于重建 Session 的消息序列
         
         Args:
             cache: 冷启动缓存数据
             include_recent_history: 是否包含最近 N 条用户对话（当 previous_response_id 失效时需要）
-            include_coldstart: 是否包含冷启动/预热历史消息（认知结果已在 L2 中，可跳过以加速重建）
+            include_coldstart: 是否包含冷启动/预热历史消息（默认 False；其结晶已在 L2 中，重启重建无需回灌）
             exclude_current_input: 会话中途恢复时排除 history 最后一条（当前正在处理的用户输入），
                 重建后 round 0 会重发该输入，避免重复注入
         """
@@ -2267,7 +2312,11 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             
             added = 0
             for msg in recent_history:
-                if msg.get("temporary", False) or msg.get("stage"):
+                if msg.get("temporary", False):
+                    continue
+                # 【调整】与启动注入口径统一：带 stage 的条目（think/note 等）也注入模型上下文。
+                # 仅当 include_coldstart=True 时跳过冷启动/预热——这两类由上方 cache 通道注入，避免重复。
+                if include_coldstart and msg.get("stage") in ("coldstart", "preheat"):
                     continue
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
@@ -2615,7 +2664,7 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                 
                 # 没有 previous_response_id，需要从头重建
                 _auto_log("[信息]   - 无 previous_response_id，需要重建 Session")
-                rebuild_msgs = self._build_rebuild_messages(cache)
+                rebuild_msgs = self._build_rebuild_messages(cache, include_recent_history=True)
                 if self._rebuild_session(rebuild_msgs, cache=cache):
                     _auto_log("[信息] ✓ Session 重建完成，跳过冷启动和预热")
                 else:
@@ -2630,8 +2679,8 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                 _auto_log(f"[信息] ⚠ 检测到不完整的缓存 (失败于 Step {failed_step})", level=logging.WARNING)
                 _auto_log(f"[信息]   将重建已完成部分，然后从 Step {failed_step} 续传")
                 
-                # 先重建已完成的 Session（尝试复用 previous_response_id，失败则包含对话历史）
-                rebuild_msgs = self._build_rebuild_messages(cache)
+                # 先重建已完成的 Session（续传属初始化未完成场景，需回灌冷启动/预热上下文，故显式 True）
+                rebuild_msgs = self._build_rebuild_messages(cache, include_coldstart=True)
                 if not self._rebuild_session(rebuild_msgs, cache=cache, restore_previous_id=previous_id):
                     _auto_log("[警告] Session 重建失败，续传可能不可用", level=logging.WARNING)
                 

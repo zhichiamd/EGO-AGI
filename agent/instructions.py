@@ -139,7 +139,8 @@ class InstructionSpec:
     priority: int = 99           # 执行优先级（小者先执行，替代原硬编码优先级表）
     protocol: str = ""           # 注入系统提示词的协议说明（新增指令时填写）
     normalize: dict = None       # 【归一化层】自然语言转译规则（如 {"kind": "note_add"}；None=不转译）
-    allowed_stages: tuple = None  # 【阶段门控】仅在这些阶段执行（None=不限）；检索类结果须回注，故限 "chat"
+    allowed_stages: tuple = None  # 【阶段门控】仅在这些阶段执行（None=不限）；
+                                  # 检索类结果须回注下一轮，故限可回注阶段（chat/think/note）
 
 
 _REGISTRY: dict[str, InstructionSpec] = {}
@@ -557,9 +558,10 @@ class InstructionExecutor:
         spec = _REGISTRY.get(instr.kind)
         if spec is None or spec.handler is None:
             return InstructionResult(instr, False, f"未知指令: {instr.kind}")
-        # 【阶段门控】声明了 allowed_stages 的指令仅在授权阶段执行（如检索类限 "chat"，
-        # 因其结果须回注下一轮才能被消费）。非授权阶段静默跳过：不做无意义 I/O，
-        # 也不返回失败——避免冷启动/预热/Think 里堆积"指令执行失败"告警噪音。
+        # 【阶段门控】声明了 allowed_stages 的指令仅在授权阶段执行（如检索类限
+        # chat/think/note，因其结果须回注下一轮才能被消费）。非授权阶段（coldstart/
+        # preheat 等直 execute 后丢弃结果的阶段）静默跳过：不做无意义 I/O，
+        # 也不返回失败——避免堆积"指令执行失败"告警噪音。
         if spec.allowed_stages is not None:
             stage = (self._current_context or {}).get("stage")
             if stage not in spec.allowed_stages:
@@ -650,7 +652,7 @@ class InstructionExecutor:
     # ── 信息操作指令 ────────────────────────────────────────────
     @register_instruction("MEMO_RD", description="检索历史会话",
                           executable=True, route_back=True, inject_result=True, priority=0,
-                          normalize={"kind": "memo_rd"}, allowed_stages=("chat",))
+                          normalize={"kind": "memo_rd"}, allowed_stages=("chat", "think", "note"))
     def _cmd_recall(self, instr: ParsedInstruction) -> InstructionResult:
         if not instr.payload:
             return InstructionResult(instr, False, "MEMO_RD 需要提供检索关键词")
@@ -731,7 +733,7 @@ class InstructionExecutor:
 
     @register_instruction("NOTE_RD", description="读取备忘录条目",
                           executable=True, route_back=True, inject_result=True, priority=0,
-                          normalize={"kind": "note_rd"}, allowed_stages=("chat",))
+                          normalize={"kind": "note_rd"}, allowed_stages=("chat", "think", "note"))
     def _cmd_note_rd(self, instr: ParsedInstruction) -> InstructionResult:
         """ID → 完整内容；关键词 → 部分字段；LIST → 全部部分字段"""
         if self.note is None:
@@ -776,13 +778,13 @@ class InstructionExecutor:
     # 【共享预算】与 MEMO_RD / NOTE_RD 共用轮次限额（循环兜底防检索空转），不单独计数。
     # 【失败自愈】on_failure_feedback 将人话失败原因（未配 Key / 超时 / 配额）回注下一轮。
     # 【不归一化】payload 本身就是自然语言检索词，无需经 FLM 转译（normalize 留空）。
-    # 【阶段门控】allowed_stages=("chat",)：检索结果须回注下一轮方能被消费，而
-    # 冷启动/预热/Think 是直 execute() 后丢弃结果，故这些阶段由 execute() 统一
-    # 静默跳过（不做无谓网络请求/配额消耗，也不产生"执行失败"告警噪音）。
+    # 【阶段门控】allowed_stages=("chat", "think", "note")：检索结果须回注下一轮方能被消费。
+    # chat/think/note 均走 _run_ego_loop 事件通道回注；冷启动/预热为直 execute() 后丢弃
+    # 结果，故这些阶段由 execute() 统一静默跳过（不做无谓网络请求/配额消耗，也不产生告警噪音）。
     @register_instruction("WEB_SRCH", description="联网检索（Tavily）",
                           executable=True, route_back=True, inject_result=True,
                           on_failure_feedback=True, priority=0,
-                          allowed_stages=("chat",))
+                          allowed_stages=("chat", "think", "note"))
     def _cmd_web_search(self, instr: ParsedInstruction) -> InstructionResult:
         if not instr.payload or not instr.payload.strip():
             return InstructionResult(instr, False, "WEB_SRCH 需要提供检索关键词")

@@ -47,7 +47,10 @@ except ImportError:
 
 import logging
 import logging.handlers
-from config import LOG_DIR, LOG_LEVEL, LOG_TO_CONSOLE, LOG_FORMAT, LOG_DATE_FORMAT
+from config import (
+    LOG_DIR, LOG_LEVEL, LOG_TO_CONSOLE, LOG_FORMAT, LOG_DATE_FORMAT,
+    SESSION_INIT_HISTORY_COUNT,  # 重启回显历史条数（与回注 LLM 保持一致）
+)
 from agent.core import EGOAgent
 from agent.tools import dispatch_line  # 手动命令注册表分发入口
 
@@ -94,6 +97,45 @@ def print_banner():
     print(banner)
 
 
+def print_history_restore(agent):
+    """【新增】重启回显：把 history 最近 SESSION_INIT_HISTORY_COUNT 条打印到终端。
+
+    映射规则与 GUI 一致：
+    - 无 stage 的 user/assistant → 用户 / EGO
+    - stage=think 的 assistant  → EGO：【自主思考】...
+    - stage=note  的 assistant  → EGO：【备忘录到期】...
+    - 带 stage 的 user（系统提示词）及 coldstart/preheat 等技术阶段 → 跳过
+    """
+    history = getattr(agent, "history", None) or []
+    limit = SESSION_INIT_HISTORY_COUNT
+    recent = history[-limit:] if len(history) > limit else history
+
+    lines = []
+    for entry in recent:
+        if entry.get("temporary", False):
+            continue
+        stage = entry.get("stage")
+        role = entry.get("role")
+        content = (entry.get("content") or "").strip()
+        if not content:
+            continue
+        if stage in (None, "chat"):
+            if role == "user":
+                lines.append(f"用户 > {content}")
+            elif role == "assistant":
+                lines.append(f"EGO > {content}")
+        elif stage == "think" and role == "assistant":
+            lines.append(f"EGO > 【自主思考】{content}")
+        elif stage == "note" and role == "assistant":
+            lines.append(f"EGO > 【备忘录到期】{content}")
+
+    if not lines:
+        return
+    print("—— 以下是恢复的历史对话（最近若干条）——")
+    for line in lines:
+        print(line)
+
+
 def main():
     # 初始化日志系统
     setup_logging()
@@ -115,6 +157,12 @@ def main():
     print(f"[就绪] API:  {agent.llm.api_base}")
     print("[提示] 输入 /help 查看命令，直接输入文字与 EGO 对话")
     print("─" * 50)
+    # 【新增】自对话（Think）SAY 输出：直接打印到终端（后台线程可能调用）
+    agent.on_think_output = lambda text: print(f"\n[EGO 自主思考] {text}")
+    # 【新增】用户回复定稿即打印（就绪即显示）：先于自对话阶段，避免回复被阻塞
+    agent.on_chat_output = lambda text: print(text)
+    # 【新增】重启回显：把历史对话打印到终端（条数与回注 LLM 一致）
+    print_history_restore(agent)
 
     while True:
         try:
@@ -141,8 +189,8 @@ def main():
         # ── 正常交互 ────────────────────────────────────────
         print("\nEGO > ", end="", flush=True)
         try:
-            response = agent.process_input(user_input)
-            print(response)
+            # 【修复】回复改由 agent.on_chat_output 回调即时打印（就绪即显示，先于自对话阶段）
+            agent.process_input(user_input)
         except Exception as e:
             print(f"\n[错误] 处理失败: {e}")
     

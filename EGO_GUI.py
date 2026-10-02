@@ -43,6 +43,7 @@ from config import (
     AUTO_THINK_INTERVAL_MINUTES,    # 自对话 间隔默认值（fallback 与 config 保持一致）
     SELF_DEFINITION_TIME,           # 每日自我定义时间默认值（fallback 与 config 保持一致）
     AUTO_NOTE_REVIEW_TIME,          # 定点备忘录审查时间默认值（fallback 与 config 保持一致）
+    SESSION_INIT_HISTORY_COUNT,     # 重启恢复历史条数（与回注 LLM 保持一致）
     GUI_MIN_WIDTH,                  # GUI 窗口最小宽度
     GUI_MIN_HEIGHT,                 # GUI 窗口最小高度
 )
@@ -464,13 +465,58 @@ class EGOApp:
             self.agent = agent
             # 【新增】备忘录到期自主运行输出：推送至对话窗口显示（EGO 消息）
             agent.on_note_output = lambda text: self.q.put(("msg", ("ego", f"【备忘录到期】{text}")))
+            # 【新增】自对话（Think）SAY 输出：推送至对话窗口显示（EGO 消息）
+            agent.on_think_output = lambda text: self.q.put(("msg", ("ego", f"【自主思考】{text}")))
+            # 【新增】用户回复定稿即显示（就绪即显示）：先于自对话阶段推送，避免回复被阻塞
+            agent.on_chat_output = lambda text: self.q.put(("msg", ("ego", text)))
             self.ready = True
+            # 【新增】重启恢复：把历史对话渲染进对话窗口（须在 init_ok 之前入队，保证先于“就绪”提示显示）
+            self._enqueue_history_restore(agent)
             self.q.put(("init_ok", f"模型: {agent.llm.model} @ {agent.llm.api_base}"))
         except Exception as e:
             self.q.put(("init_fail", str(e)))
         finally:
             for name in ("EGOAgent", "LMStudioClient"):
                 logging.getLogger(name).removeHandler(forwarder)
+
+    # 【新增】重启恢复：将 history 渲染为对话消息（条数与回注 LLM 一致，见 _initialize_session）
+    def _enqueue_history_restore(self, agent):
+        """把 agent.history 最近 SESSION_INIT_HISTORY_COUNT 条转成 GUI 消息入队。
+
+        映射规则（与实时输出的呈现保持一致）：
+        - 无 stage 的 user/assistant → 用户 / EGO
+        - stage=think 的 assistant  → 【自主思考】
+        - stage=note  的 assistant  → 【备忘录到期】
+        - 带 stage 的 user（系统提示词）及 coldstart/preheat 等技术阶段 → 跳过
+        """
+        history = getattr(agent, "history", None) or []
+        limit = SESSION_INIT_HISTORY_COUNT
+        recent = history[-limit:] if len(history) > limit else history
+
+        items = []
+        for entry in recent:
+            if entry.get("temporary", False):
+                continue
+            stage = entry.get("stage")
+            role = entry.get("role")
+            content = (entry.get("content") or "").strip()
+            if not content:
+                continue
+            if stage in (None, "chat"):
+                if role == "user":
+                    items.append(("user", content))
+                elif role == "assistant":
+                    items.append(("ego", content))
+            elif stage == "think" and role == "assistant":
+                items.append(("ego", f"【自主思考】{content}"))
+            elif stage == "note" and role == "assistant":
+                items.append(("ego", f"【备忘录到期】{content}"))
+
+        if not items:
+            return
+        self.q.put(("msg", ("system", "—— 以下是恢复的历史对话（最近若干条）——")))
+        for who, text in items:
+            self.q.put(("msg", (who, text)))
 
     def _poll(self):
         try:
@@ -603,8 +649,9 @@ class EGOApp:
     def _chat_worker(self, text: str, image_paths: list):
         try:
             data_urls = [self._to_data_url(p) for p in image_paths]
-            reply = self.agent.process_input(text, images=data_urls or None)
-            self.q.put(("msg", ("ego", reply)))
+            # 【修复】回复改由 agent.on_chat_output 回调即时推送（就绪即显示，先于自对话阶段），
+            # 此处不再重复入队，避免重复显示并保证显示顺序先于自对话输出
+            self.agent.process_input(text, images=data_urls or None)
         except Exception as e:
             self.q.put(("msg", ("system", f"处理失败: {e}")))
         finally:

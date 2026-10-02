@@ -88,6 +88,7 @@ ego-agent/
 │   ├── llm.py                 # LM Studio Responses API 客户端（统一入口 chat()，流式输出）
 │   ├── prompts.py             # 两层自我核心管理（L1 + L2 分离结构）
 │   ├── instructions.py        # LLM 自主指令注册表（解析/执行/优先级/协议全链路派生）
+│   ├── normalize.py           # 指令归一化层（自然语言 payload → 标准协议，FLM 小模型转译）
 │   ├── tools.py               # 手动命令注册表（CLI 分发/GUI 菜单/帮助文本全链路派生）
 │   ├── think_reflection.py    # 自对话/自省子系统（Mixin 解耦，统一调度器注册）
 │   ├── self_definition.py     # 每日自我定义子系统（Mixin 解耦，统一调度器注册）
@@ -148,7 +149,7 @@ ego-agent/
 
 采用分离结构存储于 `data/prompts/layer2.json`：
 
-- **自我定义（definition，ID 前缀 `D_`）**：对"我是谁"的整体描述。由每日定时任务（默认 02:59）通过主模型重新生成，旧版本软删除保留，生成失败时保留旧定义。字数上限可配置（默认 1000 字）。
+- **自我定义（definition，ID 前缀 `D_`）**：对"我是谁"的整体描述。由每日定时任务（默认 02:59）通过主模型重新生成，旧版本软删除保留，生成失败时保留旧定义。字数上限可配置（默认 1200 字）。
 - **认知条目（entries，ID 前缀 `L2_`）**：EGO 通过思考积累的洞察、经验和自我调整记录，通过 `<COG_ADD>` / `<COG_DEL>` 指令增删，支持软删除。
 
 两类 ID 独立计数，互不干扰。
@@ -180,7 +181,7 @@ EGO 采用双轨指令架构，两套机制均由注册表驱动（一处定义�
 `<TOOL>[WEB_SRCH] 检索关键词 </TOOL>` 通过 Tavily REST 接口（`requests` 直连，无额外依赖）获取外部公开信息。结果与记忆/备忘录检索走**同一条事件注入通道**（来源标签 `【系统：联网检索】`），在下一轮会话回注给模型，因此同样受 `EGO_MEMO_RD_ROUND_LIMIT` / `EGO_MEMO_RD_TOTAL_LIMIT` 约束（三类检索共用同一轮次预算）。
 
 - **降级**：未启用 / 未配 Key / 鉴权失败（401）/ 配额耗尽（429）/ 超时 / 网络异常 → 返回人话失败原因，经 `on_failure_feedback` 回注下一轮供模型自愈，不影响主流程
-- **阶段门控**：检索类指令（`MEMO_RD` / `NOTE_RD` / `WEB_SRCH`）统一声明 `allowed_stages=("chat",)`，仅在结果可回注的对话轮（EGO 主循环 / 备忘录到期轮）执行；冷启动、预热、Think 阶段由 `execute()` 静默跳过（不发起网络请求、不做无意义的向量检索/文件读，也不产生“指令执行失败”告警噪音）
+- **阶段门控**：检索类指令（`MEMO_RD` / `NOTE_RD` / `WEB_SRCH`）统一声明 `allowed_stages=("chat", "think", "note")`，仅在结果可回注的轮次（EGO 主循环 / Think / 备忘录到期轮）执行；冷启动、预热等“直 `execute()` 后即丢弃结果”的阶段静默跳过（不发起网络请求、不做无意义的向量检索/文件读，也不产生“指令执行失败”告警噪音）
 - **成本控制**：`include_raw_content=False`（不拉取正文）+ 默认不请求 Tavily 综述（`EGO_WEB_SRCH_INCLUDE_ANSWER=false`）+ 摘要按 `EGO_WEB_SRCH_SNIPPET_MAX_LENGTH` 截断 + `EGO_WEB_SRCH_MAX_RESULTS` 限制条数，避免注入上下文 token 爆炸
 - **综述开关**：`EGO_WEB_SRCH_INCLUDE_ANSWER` 取 `false`（默认，不请求）/ `basic`（短综述）/ `advanced`（详细综述），对应 Tavily 官方 `include_answer` 三态；开启后其 `answer` 字段以「综述：」一行注入，会额外占用 token（官方计费仅由 `EGO_WEB_SRCH_SEARCH_DEPTH` 决定，本开关不省配额）
 - **配置**：需在 `untitled.env` 设置 `EGO_TAVILY_API_KEY`（Tavily 控制台可免费申请）；其余见 `EGO_WEB_SRCH_*` 系列环境变量与 `config.py`
@@ -207,6 +208,8 @@ EGO 定期进行不与用户交互的自主思考，激发内部探索与认知�
 - 对话轮次达到阈值（默认 50 轮，冷启动和预热不计入）
 - 定时触发（默认每 180 分钟，等待主 Agent 空闲后执行）
 
+Think 在后台线程中执行，复用 EGO 主循环与 `EGO_MAX_ROUNDS` 轮次预算，检索类指令沿用“仅在可回注的轮次执行”的阶段门控；它不会阻塞当轮用户回复（回复定稿后即先于该阶段推送界面）。Think 各步的 SAY 输出经回调实时推送至 GUI/CLI（前缀 `【自主思考】`）。
+
 ### 自省（Reflection）
 
 审查所有 L2 认知条目，识别并清理失效认知。触发方式：
@@ -231,9 +234,10 @@ EGO 定期进行不与用户交互的自主思考，激发内部探索与认知�
 ## 会话与上下文管理
 
 - **Responses API 有状态会话链**：通过 `previous_response_id` 链式复用服务端 KV Cache，避免每轮重发全部历史
-- **冷启动（Coldstart）与预热（Preheat）**：首次启动时按 `sys.json` 提示词库分步建立初始状态
-- **Session 初始化**：无有效会话缓存时，注入最近历史对话（默认 10 条）重建上下文
-- **Session 重建兜底**：重建首批失败时自动恢复——上下文超限时逐级缩减最近对话条数重试（降级阶梯），旧 ID 失效时清除后重建；重建完成后探测验证有效性，失败不谎报成功
+- **冷启动（Coldstart）与预热（Preheat）**：首次启动时按 `sys.json` 提示词库分步建立初始状态；其问答仅写入 `coldstart_cache.json`（供 Session 重建复用），不再写入 `history.json`，因此重启重建只基于真实对话
+- **重启回显**：CLI/GUI 启动时回显最近历史对话（条数与回注 LLM 的 `EGO_SESSION_INIT_HISTORY_COUNT` 一致）；Think / 备忘录到期的输出分别带 `【自主思考】` / `【备忘录到期】` 前缀
+- **Session 初始化**：无有效会话缓存时，注入最近历史对话（默认 20 条，`EGO_SESSION_INIT_HISTORY_COUNT`）重建上下文
+- **Session 重建兜底**：重建首批失败时自动恢复——上下文超限时逐级缩减最近对话条数重试（降级阶梯），旧 ID 失效时清除后重建；重建完成后探测验证有效性，失败不谎报成功。默认重建不回灌冷启动/预热内容（其结晶已在 L2），仅“续传未完成初始化”场景显式回灌
 - **Session ID 持久化**：按轮次保存（默认每 1 轮），意外退出后可恢复到最近的 Session 状态
 - **统一 LLM 调用入口**：`llm.chat()` 封装流式/非流式两种模式，全局统一超时与停止序列管理；引擎级拒绝（SSE error 事件）以显式错误契约返回，不会被吞掉
 
@@ -271,11 +275,11 @@ CLI 输入框与 GUI 输入框/菜单栏均支持同一套命令；命令定义�
 | `/help` | 显示帮助 |
 | `/quit` | 退出程序（停止定时任务并等待后台任务完成） |
 
-直接输入文字即与 EGO 对话。EGO 会先进行自对话思考，然后给出回复。
+直接输入文字即与 EGO 对话。EGO 会在主循环内先进行多轮内部思考（`EGO_MAX_ROUNDS`），并将各轮 SAY 拼接为一条定稿回复；回复一定稿即先于随后的定时自对话（Think）阶段推送到界面，因此不会被自对话阻塞。
 
 ## 常用配置项
 
-完整清单（107 项）见 `untitled.env.example` 与 `config.py`，以下为核心项：
+完整清单（115 项）见 `untitled.env.example` 与 `config.py`，以下为核心项：
 
 | 环境变量 | 说明 | 默认值 |
 |---------|------|-------|
@@ -293,7 +297,7 @@ CLI 输入框与 GUI 输入框/菜单栏均支持同一套命令；命令定义�
 | `EGO_REFLECTION_L2_THRESHOLD` | 触发自省的 L2 条目数阈值 | `300` |
 | `EGO_SELF_DEFINITION_ENABLED` | 启用每日自我定义 | `true` |
 | `EGO_SELF_DEFINITION_TIME` | 每日自我定义时间 | `02:59` |
-| `EGO_SELF_DEFINITION_MAX_LENGTH` | 自我定义最大字数 | `1000` |
+| `EGO_SELF_DEFINITION_MAX_LENGTH` | 自我定义最大字数 | `1200` |
 | `EGO_AUTO_NOTE_REVIEW_ENABLED` | 启用定点备忘录审查 | `true` |
 | `EGO_AUTO_NOTE_REVIEW_TIME` | 定点备忘录审查时间 | `00:43` |
 | `EGO_TEMPERATURE_NOTE_REVIEW` | 备忘录审查温度 | `0.7` |
@@ -305,7 +309,7 @@ CLI 输入框与 GUI 输入框/菜单栏均支持同一套命令；命令定义�
 | `EGO_REFLECTION_THRESHOLD_MAX_RETRIES` | 阈值触发自省最大连续重试次数 | `8` |
 | `EGO_REASONING_EFFORT` | 模型 reasoning 模式（none/low/medium/high） | `none` |
 | `EGO_LOG_LEVEL` | 日志级别 | `INFO` |
-| `EGO_SERVER_IDLE_WARMUP_THRESHOLD` | 距上次 LLM 活动超过该秒数即视为空闲，触发唤醒探测 | `900` |
+| `EGO_SERVER_IDLE_WARMUP_THRESHOLD` | 距上次 LLM 活动超过该秒数即视为空闲，触发唤醒探测 | `1200` |
 | `EGO_SERVER_WARMUP_TIMEOUT` | 空闲唤醒探测请求超时（秒） | `60` |
 
 ## 安全机制
@@ -320,7 +324,7 @@ EGO 会拒绝两类用户请求：
 ## 日志与调试
 
 - 运行日志：`data/logs/ego.log`（级别由 `EGO_LOG_LEVEL` 控制，`EGO_LOG_TO_CONSOLE` 可开启控制台同步输出）
-- LLM 响应快照：`data/debug_logs/`（冷启动/预热/主循环各阶段的完整响应存档，便于排查模型输出问题）
+- LLM 响应快照：`data/debug_logs/`（冷启动/预热/主循环各阶段的完整响应存档，便于排查模型输出问题）；非对话阶段的调试文件名新增轮次后缀——Think/备忘录等循环型阶段为 `_step{n}_round{m}`，非循环阶段（preheat/coldstart/reflection/note-review/selfdef）保持 `_step{n}` 命名
 
 ## 引用
 
