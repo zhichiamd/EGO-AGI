@@ -481,36 +481,21 @@ class EGOApp:
 
     # 【新增】重启恢复：将 history 渲染为对话消息（条数与回注 LLM 一致，见 _initialize_session）
     def _enqueue_history_restore(self, agent):
-        """把 agent.history 最近 SESSION_INIT_HISTORY_COUNT 条转成 GUI 消息入队。
+        """把"与用户的对话"（chat 阶段）最近 SESSION_INIT_HISTORY_COUNT 条转成 GUI 消息入队。
 
-        映射规则（与实时输出的呈现保持一致）：
-        - 无 stage 的 user/assistant → 用户 / EGO
-        - stage=think 的 assistant  → 【自主思考】
-        - stage=note  的 assistant  → 【备忘录到期】
-        - 带 stage 的 user（系统提示词）及 coldstart/preheat 等技术阶段 → 跳过
+        【调整】口径与 LLM 会话注入一致：只显示与用户的对话，跳过 think/note 等内部阶段
+        与 coldstart/preheat/temporary（统一走 agent.get_chat_history，先过滤后切片）。
         """
-        history = getattr(agent, "history", None) or []
-        limit = SESSION_INIT_HISTORY_COUNT
-        recent = history[-limit:] if len(history) > limit else history
+        # 【调整】口径与 LLM 会话注入一致：只回显与用户的对话（chat 阶段，先过滤后切片）
+        recent = agent.get_chat_history(limit=SESSION_INIT_HISTORY_COUNT)
 
         items = []
         for entry in recent:
-            if entry.get("temporary", False):
-                continue
-            stage = entry.get("stage")
-            role = entry.get("role")
             content = (entry.get("content") or "").strip()
             if not content:
                 continue
-            if stage in (None, "chat"):
-                if role == "user":
-                    items.append(("user", content))
-                elif role == "assistant":
-                    items.append(("ego", content))
-            elif stage == "think" and role == "assistant":
-                items.append(("ego", f"【自主思考】{content}"))
-            elif stage == "note" and role == "assistant":
-                items.append(("ego", f"【备忘录到期】{content}"))
+            who = "user" if entry.get("role") == "user" else "ego"
+            items.append((who, content))
 
         if not items:
             return

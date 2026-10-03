@@ -98,36 +98,21 @@ def print_banner():
 
 
 def print_history_restore(agent):
-    """【新增】重启回显：把 history 最近 SESSION_INIT_HISTORY_COUNT 条打印到终端。
+    """【新增】重启回显：把"与用户的对话"（chat 阶段）最近 SESSION_INIT_HISTORY_COUNT 条打印到终端。
 
-    映射规则与 GUI 一致：
-    - 无 stage 的 user/assistant → 用户 / EGO
-    - stage=think 的 assistant  → EGO：【自主思考】...
-    - stage=note  的 assistant  → EGO：【备忘录到期】...
-    - 带 stage 的 user（系统提示词）及 coldstart/preheat 等技术阶段 → 跳过
+    【调整】口径与 LLM 会话注入一致：只显示与用户的对话，跳过 think/note 等内部阶段
+    与 coldstart/preheat/temporary（统一走 agent.get_chat_history，先过滤后切片）。
     """
-    history = getattr(agent, "history", None) or []
-    limit = SESSION_INIT_HISTORY_COUNT
-    recent = history[-limit:] if len(history) > limit else history
+    # 【调整】口径与 LLM 会话注入一致：只回显与用户的对话（chat 阶段，先过滤后切片）
+    recent = agent.get_chat_history(limit=SESSION_INIT_HISTORY_COUNT)
 
     lines = []
     for entry in recent:
-        if entry.get("temporary", False):
-            continue
-        stage = entry.get("stage")
-        role = entry.get("role")
         content = (entry.get("content") or "").strip()
         if not content:
             continue
-        if stage in (None, "chat"):
-            if role == "user":
-                lines.append(f"用户 > {content}")
-            elif role == "assistant":
-                lines.append(f"EGO > {content}")
-        elif stage == "think" and role == "assistant":
-            lines.append(f"EGO > 【自主思考】{content}")
-        elif stage == "note" and role == "assistant":
-            lines.append(f"EGO > 【备忘录到期】{content}")
+        prefix = "用户 > " if entry.get("role") == "user" else "EGO > "
+        lines.append(prefix + content)
 
     if not lines:
         return
@@ -157,6 +142,8 @@ def main():
     print(f"[就绪] API:  {agent.llm.api_base}")
     print("[提示] 输入 /help 查看命令，直接输入文字与 EGO 对话")
     print("─" * 50)
+    # 【新增】备忘录到期自主运行输出：直接打印到终端（后台线程可能调用）
+    agent.on_note_output = lambda text: print(f"\n[备忘录到期] {text}")
     # 【新增】自对话（Think）SAY 输出：直接打印到终端（后台线程可能调用）
     agent.on_think_output = lambda text: print(f"\n[EGO 自主思考] {text}")
     # 【新增】用户回复定稿即打印（就绪即显示）：先于自对话阶段，避免回复被阻塞

@@ -102,6 +102,12 @@ def _is_executable(kind: str) -> bool:
     spec = get_instruction(kind)
     return bool(spec and spec.executable)
 
+
+# 【新增】会话重建/初始化注入历史的阶段白名单：仅"与用户的对话"（stage 为 None 或 "chat"）。
+# 自对话（think）、备忘录执行（note）、反思（reflection）等内部阶段的输出虽保留在
+# history.json 中供追溯，但不注入 LLM 上下文，避免重启/断连重建后内部思考污染对话。
+CHAT_HISTORY_STAGES: tuple = (None, "chat")
+
 # 注：无效内容统一检测（is_invalid_content / INVALID_PLACEHOLDER_PATTERNS）
 # 定义于 agent/instructions.py（避免循环导入），已从顶部 import 引入
 
@@ -316,14 +322,17 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                 # 从配置读取历史对话注入数量
                 history_count = SESSION_INIT_HISTORY_COUNT
                 
-                # 只保留最近的 N 条对话（避免 token 过多）
-                recent_history = self.history[-history_count:] if len(self.history) > history_count else self.history
+                # 【修复】仅"与用户的对话"（chat 阶段），且先过滤后切片（N = 最近 N 条用户对话）
+                recent_history = self.get_chat_history(limit=history_count)
                 
                 _auto_log(f"[信息] 检测到 {len(recent_history)} 条历史对话，将注入到 Session 中（配置上限: {history_count}）")
        
                 for msg in recent_history:
                     # 跳过临时消息和系统消息
                     if msg.get("temporary", False):
+                        continue
+                    # 【新增】仅注入与用户的对话（chat）阶段，跳过自对话/备忘录执行/反思等内部阶段输出
+                    if msg.get("stage") not in CHAT_HISTORY_STAGES:
                         continue
                     
                     role = msg.get("role", "user")
@@ -843,6 +852,29 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             except Exception:
                 pass
 
+    def get_chat_history(self, limit: int = None, exclude_last: bool = False) -> list:
+        """
+        【新增】返回"与用户的对话"（chat 阶段）历史条目。
+
+        跳过 temporary 与 think/note/反思等内部阶段输出（这类条目仍存 history.json 供追溯，
+        但不注入 LLM 上下文、也不在重启回显中展示）。会话初始化/重建/预热注入与 GUI/CLI
+        重启回显共用此方法，保证口径与条数一致。
+
+        Args:
+            limit: 最多返回最近 N 条（先过滤后切片；None 表示不限制，0 表示不返回）
+            exclude_last: 排除最后一条（会话中途恢复时排除正在处理的用户输入，避免重复注入）
+        """
+        src = self.history[:-1] if exclude_last else self.history
+        entries = [
+            m for m in src
+            if not m.get("temporary", False)
+            and m.get("stage") in CHAT_HISTORY_STAGES
+            and m.get("role") in ("user", "assistant")
+        ]
+        if limit is not None:
+            entries = entries[-limit:] if limit > 0 else []
+        return entries
+
     def _save_llm_debug_log(self, response: str, round_num: int = 0, stage: str = "chat", step: int = 0):
         """
         保存每轮 LLM 原始响应到 debug log 文件
@@ -958,10 +990,12 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         1. 如果历史较短（< 20 条），一次性发送所有历史
         2. 如果历史较长，发送最近的 N 条
         """
-        if not self.history or len(self.history) < 2:
+        # 【新增】仅使用与用户的对话（chat）阶段重建 KV cache（先过滤后切片，统一走 get_chat_history）
+        chat_history = self.get_chat_history()
+        if len(chat_history) < 2:
             return
         
-        _auto_log(f"[预热] 检测到 {len(self.history)} 条历史对话，正在重建 KV cache...")
+        _auto_log(f"[预热] 检测到 {len(chat_history)} 条历史对话，正在重建 KV cache...")
         
         # 构建预热消息
         warmup_messages = []
@@ -974,9 +1008,9 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         
         # 策略选择：根据历史长度决定
         max_warmup_rounds = RESPONSES_API_MAX_INITIAL_ROUNDS
-        if len(self.history) <= max_warmup_rounds * 2:
+        if len(chat_history) <= max_warmup_rounds * 2:
             # 短历史：发送全部
-            for entry in self.history:
+            for entry in chat_history:
                 role = entry["role"]
                 content = entry["content"]
                 
@@ -986,10 +1020,10 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                     warmup_messages.append({"role": "assistant", "content": content})
         else:
             # 长历史：只发送最近的 N 轮
-            recent_history = self.history[-(max_warmup_rounds * 2):]
+            recent_history = chat_history[-(max_warmup_rounds * 2):]
             
             # 添加一个摘要提示
-            early_count = len(self.history) - len(recent_history)
+            early_count = len(chat_history) - len(recent_history)
             summary = f"【系统：之前有 {early_count} 轮和用户的对话但很多已遗忘，以下是最近的对话内容】"
             warmup_messages.append({"role": "user", "content": summary})
             
@@ -2306,17 +2340,18 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         
         # 4. 如果 previous_response_id 失效，追加最近的用户对话历史
         if include_recent_history and self.history:
-            history_pool = self.history[:-1] if exclude_current_input else self.history
             limit = history_count if history_count is not None else SESSION_INIT_HISTORY_COUNT
-            recent_history = history_pool[-limit:] if len(history_pool) > limit else history_pool
+            # 【修复】先过滤（仅 chat 阶段）后切片：上限表示"最近 N 条用户对话"，不被内部阶段挤占额度
+            recent_history = self.get_chat_history(limit=limit, exclude_last=exclude_current_input)
             
             added = 0
             for msg in recent_history:
                 if msg.get("temporary", False):
                     continue
-                # 【调整】与启动注入口径统一：带 stage 的条目（think/note 等）也注入模型上下文。
-                # 仅当 include_coldstart=True 时跳过冷启动/预热——这两类由上方 cache 通道注入，避免重复。
-                if include_coldstart and msg.get("stage") in ("coldstart", "preheat"):
+                # 【调整】仅注入与用户的对话（chat）阶段，与启动注入口径统一；
+                # 自对话（think）、备忘录执行（note）、反思等内部阶段输出不注入；
+                # 冷启动/预热由上方 cache 通道注入（include_coldstart=True）时一并跳过，避免重复。
+                if msg.get("stage") not in CHAT_HISTORY_STAGES:
                     continue
                 role = msg.get("role", "user")
                 content = msg.get("content", "")

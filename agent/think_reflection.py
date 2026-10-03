@@ -372,8 +372,9 @@ class ThinkReflectionMixin:
 
                 output = state.output_content.strip()
 
-                # 【新增】写入历史（stage=think：供会话重建/追溯；客观记忆层按 stage
-                # 过滤，不污染 ChromaDB，也不参与对话计数与自省统计）
+                # 【新增】写入历史（stage=think：仅供追溯；会话重建/初始化只注入用户对话
+                # （chat）阶段，本条目不再进入模型上下文；客观记忆层按 stage 过滤，
+                # 不污染 ChromaDB，也不参与对话计数与自省统计）
                 self._add_to_history_with_stage("user", prompt, stage="think")
                 self._add_to_history_with_stage("assistant", output, stage="think")
 
