@@ -35,6 +35,7 @@ LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # ── LMStudio 对话模型配置 ──────────────────────────────
 # 主模型推荐：gemma-4-31b（Q4 量化）或 Qwen-3.8-27b（Q4 量化）
+# 【重要】对话主模型必须关闭思考模式（Thinking / Reasoning）：请在 LM Studio 中关闭该模型的思考开关
 LM_API_BASE      = os.getenv("EGO_LM_API_BASE", "http://localhost:1234/v1")
 LM_MODEL         = os.getenv("EGO_LM_MODEL", "default-model")
 
@@ -106,6 +107,7 @@ LLM_API_TIMEOUT  = int(os.getenv("EGO_LLM_API_TIMEOUT", "600"))  # 默认 10 分
 STREAM_NO_TOKEN_TIMEOUT = int(os.getenv("EGO_STREAM_NO_TOKEN_TIMEOUT", "600"))  # 默认 10 分钟
 
 # ── Reasoning/Think 模式配置 ──────────────────────────────
+# 【重要】对话主模型必须关闭思考模式（Thinking / Reasoning）：请在 LM Studio 中关闭该模型的思考开关。
 # 控制模型的 reasoning/think 模式（如果模型支持）
 # 可选值："none"（关闭）, "low"（低）, "medium"（中）, "high"（高）
 # 留空则不发送该参数，使用模型默认行为

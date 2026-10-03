@@ -41,8 +41,10 @@ Read them in [`showcase/`](showcase/README.md): case studies, full texts (Markdo
 
 ### 1. Prerequisites
 
+> **Important: thinking mode (Thinking / Reasoning) must be disabled on the main conversation model.** Turn off the model's thinking toggle when loading it in LM Studio — otherwise the model's own thinking output mixes into the reply stream and interferes with EGO's `<THINK>` / `<SAY>` protocol parsing. EGO also explicitly sends `reasoning_effort="none"` on every request (controlled by `EGO_REASONING_EFFORT`, default `none`) to turn Think Mode off.
+
 - Python 3.10+
-- LM Studio installed with the main model loaded and the local server running (default `http://localhost:1234`). **Recommended main model: `gemma-4-31b` (Q4 quantized) or `Qwen-3.8-27b` (Q4 quantized).**
+- LM Studio installed with the main model loaded and the local server running (default `http://localhost:1234`). **Recommended main model: `gemma-4-31b` (Q4 quantized) or `Qwen-3.8-27b` (Q4 quantized); disable thinking mode when loading it.**
 - Ollama running (default `http://localhost:11434`) with these models pulled: the embedding model `bge-m3`, and the small model shared by summarization and instruction normalization (default `gemma4-it:e4b`)
 
 > Deployment needs only **LM Studio + Ollama** (no separate FLM service): Ollama simultaneously handles embedding, structured summarization, and instruction normalization.
@@ -310,7 +312,7 @@ The full list (115 items) is in `untitled.env.example` and `config.py`; the core
 | `EGO_REFLECTION_API_TIMEOUT` | Introspection timeout (seconds) | `3600` |
 | `EGO_REFLECTION_THRESHOLD_RETRY_DELAY` | Delayed retry (seconds) after a threshold-triggered introspection lock-wait timeout | `1800` |
 | `EGO_REFLECTION_THRESHOLD_MAX_RETRIES` | Max consecutive retries for threshold-triggered introspection | `8` |
-| `EGO_REASONING_EFFORT` | Model reasoning mode (none/low/medium/high) | `none` |
+| `EGO_REASONING_EFFORT` | Model reasoning mode (none/low/medium/high); **thinking mode must be disabled on the main model in LM Studio** | `none` |
 | `EGO_LOG_LEVEL` | Log level | `INFO` |
 | `EGO_SERVER_IDLE_WARMUP_THRESHOLD` | Idle is assumed when the seconds since the last LLM activity exceed this value, triggering a wake-up probe | `1200` |
 | `EGO_SERVER_WARMUP_TIMEOUT` | Timeout for idle wake-up probe requests (seconds) | `60` |

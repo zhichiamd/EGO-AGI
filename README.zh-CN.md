@@ -41,8 +41,10 @@ EGO 提供 CLI 与 tkinter GUI 双入口（共用同一套配置与会话状态�
 
 ### 1. 前置条件
 
+> **重要：对话主模型必须关闭思考模式（Thinking / Reasoning）。** 请在 LM Studio 加载主模型时关闭其思考开关——否则模型自带的思考输出会混入回复流，干扰 EGO 的 `<THINK>` / `<SAY>` 协议解析。EGO 亦会在每次请求中显式发送 `reasoning_effort="none"`（由 `EGO_REASONING_EFFORT` 控制，默认 `none`）以关闭 Think Mode。
+
 - Python 3.10+
-- LM Studio 已安装并加载主模型，本地服务器已开启（默认 `http://localhost:1234`）。**主模型推荐 `gemma-4-31b`（Q4 量化）或 `Qwen-3.8-27b`（Q4 量化）。**
+- LM Studio 已安装并加载主模型，本地服务器已开启（默认 `http://localhost:1234`）。**主模型推荐 `gemma-4-31b`（Q4 量化）或 `Qwen-3.8-27b`（Q4 量化）；加载时须关闭思考模式。**
 - Ollama 已运行（默认 `http://localhost:11434`），并已拉取：embedding 模型 `bge-m3`，以及摘要与指令归一化共用的小模型（默认 `gemma4-it:e4b`）
 
 > 部署仅需 **LM Studio + Ollama** 两个本地服务（无需额外的 FLM 服务）：Ollama 同时承担 embedding、结构化摘要与指令归一化三项职责。
@@ -310,7 +312,7 @@ CLI 输入框与 GUI 输入框/菜单栏均支持同一套命令；命令定义�
 | `EGO_REFLECTION_API_TIMEOUT` | 自省超时（秒） | `3600` |
 | `EGO_REFLECTION_THRESHOLD_RETRY_DELAY` | 阈值触发自省等锁超时后的延迟重试（秒） | `1800` |
 | `EGO_REFLECTION_THRESHOLD_MAX_RETRIES` | 阈值触发自省最大连续重试次数 | `8` |
-| `EGO_REASONING_EFFORT` | 模型 reasoning 模式（none/low/medium/high） | `none` |
+| `EGO_REASONING_EFFORT` | 模型 reasoning 模式（none/low/medium/high）；**主模型须在 LM Studio 侧关闭思考模式** | `none` |
 | `EGO_LOG_LEVEL` | 日志级别 | `INFO` |
 | `EGO_SERVER_IDLE_WARMUP_THRESHOLD` | 距上次 LLM 活动超过该秒数即视为空闲，触发唤醒探测 | `1200` |
 | `EGO_SERVER_WARMUP_TIMEOUT` | 空闲唤醒探测请求超时（秒） | `60` |
