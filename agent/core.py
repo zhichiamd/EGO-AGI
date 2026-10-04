@@ -2594,24 +2594,31 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         return (time.time() - self._last_llm_activity) > SERVER_IDLE_WARMUP_THRESHOLD
 
     def _warmup_server(self):
-        """长时间空闲后、首个正式请求前，先发一次轻量无状态请求唤醒 LM Studio 服务端。
+        """长时间空闲后、首个正式请求前，先发一次轻量"链内"请求唤醒 LM Studio 服务端。
 
         服务端在空闲/模型恢复阶段处理首个请求时容易卡住（no_token 超时、0 token），
-        提前发一个 max_tokens=1 的无 previous_response_id 探测，迫使服务端完成
-        模型加载/资源预热，使随后的正式请求能快速产出。
+        提前发一个 max_tokens=1 的探测，迫使服务端完成模型加载/资源预热，使随后的
+        正式请求能快速产出。
 
-        与 _validate_previous_response_id 的区别：后者携带 previous_response_id 用于
-        校验会话链；本探测不带 id、创建全新无状态请求，绝不触碰 _previous_response_id、
-        不污染主会话链。失败静默降级，不影响主流程。
+        【修复】探测改为"链内探测"：存在 previous_response_id 时将其一并携带，并从响应
+        同步新的会话链头（与 _validate_previous_response_id 同构）。原实现发的是"无
+        previous_response_id 的全新无状态请求"，在单 slot（LRU 换入）下会顶掉主会话已
+        缓存的 KV 前缀，使紧随其后的正式请求 t_last=-1、从 0% 重算整段上下文（空闲越久
+        上下文越大，代价越高）。链内探测只延长、不替换 KV 前缀，兼得"唤醒模型"与
+        "保留会话缓存"。无会话链（冷启动）时仍按无状态探测处理。失败静默降级。
         """
         try:
             probe_payload = {
                 "model": self.llm.model,
-                "input": "【系统：唤醒，仅回复“OK”即可。】",
+                "input": "【系统：空闲唤醒探测，仅回复“OK”即可。】",
                 "temperature": 0.0,
                 "max_tokens": 1,
                 "stream": False,
             }
+            # 【修复】链内探测：携带当前会话链头，避免顶掉主会话 KV 前缀
+            cur_id = self.llm.get_session_id()
+            if cur_id:
+                probe_payload["previous_response_id"] = cur_id
             _auto_log(f"[信息] ⏳ 检测到空闲，发送唤醒探测（{SERVER_WARMUP_TIMEOUT}s 超时）...")
             response = self.llm.session.post(
                 self.llm.responses_url,
@@ -2621,6 +2628,15 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             )
             try:
                 if response.status_code == 200:
+                    # 【修复】链内探测会推进会话链：同步新链头，确保后续正式请求延续同一链
+                    # （仅在原本就有链时更新；冷启动无链时不接管探测会话，保持原行为）
+                    if cur_id:
+                        try:
+                            new_id = response.json().get("id")
+                        except Exception:
+                            new_id = None
+                        if new_id:
+                            self.llm.set_session_id(new_id)
                     _auto_log("[信息] ✓ 服务端已唤醒")
                     self._touch_llm_activity()  # 仅成功才刷新活动时间：失败保持空闲态，下轮仍会试探
             finally:
