@@ -296,8 +296,7 @@ CONSECUTIVE_SIMILAR_SHORT_LENGTH = int(os.getenv("EGO_CONSECUTIVE_SIMILAR_SHORT_
 
 # ── 空闲唤服探测（长时间空闲后首个请求前，先轻量唤醒 LM Studio）────────────
 # 距上次 LLM 活动超过该秒数即视为空闲：发起正式请求前先发一次 max_tokens=1 的
-# 无 previous_response_id 探测，迫使服务端完成模型加载/资源预热，避免冷启动首个
-# 请求卡死（no_token 超时、0 token）。探测失败静默降级，不影响主流程。
+# 有 previous_response_id 探测，避免首个请求卡死（no_token 超时、0 token）。探测失败静默降级，不影响主流程。
 SERVER_IDLE_WARMUP_THRESHOLD = int(os.getenv("EGO_SERVER_IDLE_WARMUP_THRESHOLD", "1200"))
 # 唤醒探测请求超时（秒）：服务端完全卡死时最多等待该时长即放弃
 SERVER_WARMUP_TIMEOUT = int(os.getenv("EGO_SERVER_WARMUP_TIMEOUT", "60"))
