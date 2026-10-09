@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul 2>&1
 echo ========================================
-echo  EGO AGI Nuitka 打包脚本
+echo  EGO Agent Nuitka 打包脚本
 echo ========================================
 echo.
 
@@ -14,22 +14,31 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-REM 创建虚拟环境
-echo [1/5] 创建虚拟环境...
-if not exist _build_venv (
+REM 创建/校验虚拟环境（必须为 Python 3.12）
+REM 注意：Nuitka 在 Python 3.13+ 上禁用 --mingw64，若 _build_venv 被其它 Python 版本污染会导致编译 FATAL 失败，
+REM       故此处校验 venv 版本，非 3.12 时自动重建
+echo [1/5] 校验虚拟环境...
+set "VENV_VER="
+if exist _build_venv\Scripts\python.exe (
+    for /f "delims=" %%v in ('_build_venv\Scripts\python.exe -c "import sys;print(sys.version_info[0]*100+sys.version_info[1])" 2^>nul') do set "VENV_VER=%%v"
+)
+if not "%VENV_VER%"=="312" (
+    echo [提示] 虚拟环境缺失或版本非 3.12（检测到: %VENV_VER%），重新创建...
+    if exist _build_venv rmdir /s /q _build_venv
     py -3.12 -m venv _build_venv
     if %ERRORLEVEL% neq 0 (
         echo [错误] 创建虚拟环境失败
         pause
         exit /b 1
     )
+    _build_venv\Scripts\python.exe -m ensurepip --upgrade >nul 2>&1
 ) else (
-    echo 虚拟环境已存在，跳过创建
+    echo 虚拟环境已就绪（Python 3.12）
 )
 
 REM 安装 Nuitka
 echo [2/5] 安装 Nuitka 和依赖...
-_build_venv\Scripts\pip.exe install nuitka ordered-set zstandard requests chromadb python-dotenv
+_build_venv\Scripts\python.exe -m pip install nuitka ordered-set zstandard requests chromadb python-dotenv
 if %ERRORLEVEL% neq 0 (
     echo [错误] 安装 Nuitka 失败
     pause
@@ -57,7 +66,7 @@ REM 运行 Nuitka 编译
 echo [5/5] 开始编译（预计 10-30 分钟）...
 echo.
 set NUITKA_CACHE_DIR=%NUITKA_CACHE_DIR%
-_build_venv\Scripts\python.exe -m nuitka --assume-yes-for-downloads --onefile --standalone --windows-disable-console --windows-icon-from-ico=EGO.ico --output-dir=dist --enable-plugin=tk-inter --include-package=agent --include-package=chromadb --include-package=dotenv --nofollow-import-to=tkinter.test --nofollow-import-to=test --mingw64 EGO_GUI.py
+_build_venv\Scripts\python.exe -m nuitka --assume-yes-for-downloads --onefile --standalone --windows-console-mode=disable --windows-icon-from-ico=EGO.ico --output-dir=dist --enable-plugin=tk-inter --include-package=agent --include-package=chromadb --include-package=dotenv --nofollow-import-to=tkinter.test --nofollow-import-to=test --mingw64 EGO_GUI.py
 
 if %ERRORLEVEL% neq 0 (
     echo.

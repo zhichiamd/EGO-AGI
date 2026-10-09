@@ -14,6 +14,7 @@ EGO 图形界面（GUI）—— 独立入口，不改动 CLI（ego.py）
 
 import os
 import re
+import sys
 import base64
 import queue
 import logging
@@ -24,7 +25,11 @@ import threading
 try:
     from dotenv import load_dotenv
     # Nuitka --onefile 下 __file__ 指向临时目录，需用 exe 所在目录定位 env 文件
-    _env_dir = os.path.dirname(os.path.abspath(sys.argv[0])) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+    # 注意：Nuitka 只设置 __compiled__ 而非 sys.frozen，故此处与 config.py 的检测口径保持一致
+    if "__compiled__" in globals() or getattr(sys, "frozen", False):
+        _env_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    else:
+        _env_dir = os.path.dirname(os.path.abspath(__file__))
     env_file = os.path.join(_env_dir, "untitled.env")
     if os.path.exists(env_file):
         load_dotenv(env_file)

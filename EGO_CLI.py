@@ -36,7 +36,13 @@ import os
 # 【修复】必须在 import config 之前加载环境变量，否则 config 中的 os.getenv 读不到值
 try:
     from dotenv import load_dotenv
-    env_file = os.path.join(os.path.dirname(__file__), "untitled.env")
+    # Nuitka --onefile 下 __file__ 指向临时目录，需用 exe 所在目录定位 env 文件
+    # 注意：Nuitka 只设置 __compiled__ 而非 sys.frozen，故此处与 config.py 的检测口径保持一致
+    if "__compiled__" in globals() or getattr(sys, "frozen", False):
+        _env_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+    else:
+        _env_dir = os.path.dirname(os.path.abspath(__file__))
+    env_file = os.path.join(_env_dir, "untitled.env")
     if os.path.exists(env_file):
         load_dotenv(env_file)
     else:
