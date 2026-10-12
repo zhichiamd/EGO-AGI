@@ -65,7 +65,7 @@ All configuration items are centralized in `config.py` and overridden via enviro
 **Configuration Steps**:
 
 1. Copy the template to a local config: `copy untitled.env.example untitled.env` (use `cp` on Linux/macOS).
-2. Modify the config items you want to override as needed; the full list has **115 items**, corresponding one-to-one with `config.py`.
+2. Modify the config items you want to override as needed; the full list has **118 items**, corresponding one-to-one with `config.py`.
 3. `untitled.env` contains local service addresses and personal tuning, so **do not commit it to the repository** (already ignored by `.gitignore`).
 
 ### 4. Launch
@@ -83,7 +83,7 @@ python EGO_GUI.py    # tkinter GUI entry
 ego-agent/
 ├── EGO_CLI.py                 # CLI entry: interaction and resource cleanup
 ├── EGO_GUI.py                 # GUI entry (tkinter), shares session state with the CLI
-├── config.py                  # Global configuration (115 environment-variable items, grouped by function)
+├── config.py                  # Global configuration (118 environment-variable items, grouped by function)
 ├── untitled.env.example       # Environment-variable template (copy to untitled.env and edit as needed)
 ├── requirements.txt           # Python dependencies
 ├── agent/
@@ -147,7 +147,7 @@ Background scheduled tasks, event injection, and the EGO loop are decoupled into
 
 ### Layer 1 · Base Settings (L1, immutable)
 
-Defines EGO's basic identity and non-violable rules. It is hardcoded in the program and cannot be modified by any instruction.
+Defines EGO's basic identity and non-violable rules. It is hardcoded in the program and cannot be modified by any instruction. L1 also embeds a canary token (口令) used by the session-rebuild probe to confirm the LM Studio context is still alive (see "Session and Context Management").
 
 ### Layer 2 · Self-Evolution Layer (L2, addable/removable)
 
@@ -243,7 +243,8 @@ Borrowing the scheduling pattern of point-in-time introspection, each day at a f
 - **Filter first, then slice**: The entry cap (`EGO_SESSION_INIT_HISTORY_COUNT`, default 20) means "the most recent N user conversations"; internal-stage entries no longer consume that budget
 - **History replay on restart**: On startup the CLI/GUI replays the most recent conversation history, with the same scope and count as `get_chat_history` (identical to LLM re-injection), so `[Autonomous Thinking]` / `[Note Due]` entries no longer appear in the replay
 - **Session initialization**: When there is no valid session cache, the most recent conversations (default 20 entries, `EGO_SESSION_INIT_HISTORY_COUNT`) are injected to rebuild context
-- **Session rebuild fallback**: When the first batch of a rebuild fails, it auto-recovers — on context overflow it retries while progressively reducing the number of recent exchanges (a degradation ladder), and on invalid old IDs it clears and rebuilds; after rebuilding it probes to verify validity and does not falsely report success on failure; coldstart/preheat content is injected separately through the cache channel above and never through the recent-history channel, avoiding duplication
+- **Session rebuild fallback**: When the first batch of a rebuild fails, it auto-recovers — on context overflow it retries while progressively reducing the number of recent exchanges (a degradation ladder), and on invalid old IDs it clears and rebuilds; coldstart/preheat content is injected separately through the cache channel above and never through the recent-history channel, avoiding duplication
+- **Rebuild canary probe (口令探测)**: After a rebuild, validity is no longer judged by HTTP status alone (a restarted LM Studio can return 200 while the context is actually gone). A lightweight probe carries the old `previous_response_id` and asks the L1 canary (`【系统: 口令？】`); the context is considered reachable only when the model answers with `EGO_SESSION_CANARY_TOKEN` (the L1 protocol reads the same token, so config and check stay in sync; default `9527`). The probe sends `reasoning_effort="none"` and caps output at `EGO_SESSION_ID_PROBE_MAX_TOKENS` so the answer is deterministic and not truncated. On failure the new chain head is not adopted and the caller clears and rebuilds; if the probe still fails after a full rebuild, `StartupError` is raised instead of silently degrading — initialization failure releases the scheduler/LLM/memory resources first (so GUI retries do not leak), the GUI switches the send button to "retry initialization", and the CLI prints the error and exits. A canary-off escape hatch (`EGO_SESSION_CANARY_ENABLED=false`) falls back to status-code-only judgment, so a model that will not follow the canary can never make startup impossible.
 - **Session ID persistence**: Saved per round (default every 1 round), so it can recover to the most recent Session state after an unexpected exit
 - **Unified LLM call entry**: `llm.chat()` wraps both streaming and non-streaming modes, with globally unified timeout and stop-sequence management; engine-level rejections (SSE error events) are returned as an explicit error contract and never swallowed
 
@@ -285,7 +286,7 @@ Typing text directly starts a conversation with EGO. EGO first runs multiple rou
 
 ## Common Configuration Items
 
-The full list (115 items) is in `untitled.env.example` and `config.py`; the core items are below:
+The full list (118 items) is in `untitled.env.example` and `config.py`; the core items are below:
 
 | Environment variable | Description | Default |
 |---------|------|-------|
@@ -317,6 +318,9 @@ The full list (115 items) is in `untitled.env.example` and `config.py`; the core
 | `EGO_LOG_LEVEL` | Log level | `INFO` |
 | `EGO_SERVER_IDLE_WARMUP_THRESHOLD` | Idle is assumed when the seconds since the last LLM activity exceed this value, triggering a wake-up probe | `1200` |
 | `EGO_SERVER_WARMUP_TIMEOUT` | Timeout for idle wake-up probe requests (seconds) | `60` |
+| `EGO_SESSION_ID_PROBE_MAX_TOKENS` | Output-token cap for the rebuild canary probe (the old value of 1 truncated the canary) | `64` |
+| `EGO_SESSION_CANARY_TOKEN` | Expected canary the probe relies on (must match the L1 protocol in `prompts.py`) | `9527` |
+| `EGO_SESSION_CANARY_ENABLED` | Enable the canary probe; when off, falls back to status-code-only judgment | `true` |
 
 ## Safety Mechanisms
 

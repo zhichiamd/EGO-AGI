@@ -33,13 +33,11 @@ LOG_TO_CONSOLE = os.getenv("EGO_LOG_TO_CONSOLE", "false").lower() == "true"
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-# ── LMStudio 对话模型配置 ──────────────────────────────
-# 主模型推荐：gemma-4-31b（Q4 量化）或 Qwen-3.8-27b（Q4 量化）
-# 【重要】对话主模型必须关闭思考模式（Thinking / Reasoning）：请在 LM Studio 中关闭该模型的思考开关
+# ── 主模型配置 ──────────────────────────────
 LM_API_BASE      = os.getenv("EGO_LM_API_BASE", "http://localhost:1234/v1")
 LM_MODEL         = os.getenv("EGO_LM_MODEL", "default-model")
 
-# ── 摘要模型配置（Ollama）──────────────────────────────
+# ── Ollama 摘要模型配置 ──────────────────────────────
 FLM_API_BASE     = os.getenv("EGO_FLM_API_BASE", "http://localhost:11434/v1")
 FLM_MODEL        = os.getenv("EGO_FLM_MODEL", "gemma4-it:e4b")
 
@@ -52,7 +50,7 @@ FLM_SUMMARY_TRIGGER_LENGTH = int(os.getenv("EGO_FLM_SUMMARY_TRIGGER_LENGTH", "10
 # 摘要目标字符数
 FLM_SUMMARY_TARGET_LENGTH = int(os.getenv("EGO_FLM_SUMMARY_TARGET_LENGTH", "600"))
 
-# ── 指令归一化层配置（Ollama 小模型转译自然语言 payload → 标准协议，失败透传）────────
+# ── Ollama 指令归一化层配置（LLM 转译自然语言 payload → 标准协议，失败透传）────────
 NORM_ENABLED = os.getenv("EGO_NORM_ENABLED", "true").lower() == "true"
 NORM_API_BASE = os.getenv("EGO_NORM_API_BASE", "http://localhost:11434/v1")
 NORM_MODEL = os.getenv("EGO_NORM_MODEL", "gemma4-it:e4b")
@@ -107,7 +105,6 @@ LLM_API_TIMEOUT  = int(os.getenv("EGO_LLM_API_TIMEOUT", "600"))  # 默认 10 分
 STREAM_NO_TOKEN_TIMEOUT = int(os.getenv("EGO_STREAM_NO_TOKEN_TIMEOUT", "600"))  # 默认 10 分钟
 
 # ── Reasoning/Think 模式配置 ──────────────────────────────
-# 【重要】对话主模型必须关闭思考模式（Thinking / Reasoning）：请在 LM Studio 中关闭该模型的思考开关。
 # 控制模型的 reasoning/think 模式（如果模型支持）
 # 可选值："none"（关闭）, "low"（低）, "medium"（中）, "high"（高）
 # 留空则不发送该参数，使用模型默认行为
@@ -277,6 +274,12 @@ SESSION_REBUILD_BATCH_SIZE = int(os.getenv("EGO_SESSION_REBUILD_BATCH_SIZE", "4"
 SESSION_ID_PROBE_MAX_RETRIES = int(os.getenv("EGO_SESSION_ID_PROBE_MAX_RETRIES", "2"))
 # previous_response_id 探测请求超时（秒）
 SESSION_ID_PROBE_TIMEOUT = int(os.getenv("EGO_SESSION_ID_PROBE_TIMEOUT", "300"))
+# 口令探测输出 token 上限：必须足够输出完整口令（旧实现沿用 1 会截断；模型可能有前导输出）
+SESSION_ID_PROBE_MAX_TOKENS = max(8, int(os.getenv("EGO_SESSION_ID_PROBE_MAX_TOKENS", "64")))
+# 口令探测期望应答口令（L1 提示词从此处读取并写入系统提示词；改此值即同时改变 L1 口令与探测判据）
+SESSION_CANARY_TOKEN = os.getenv("EGO_SESSION_CANARY_TOKEN", "9527")
+# 【可选逃生开关】关闭后回落为原“仅判状态码”，避免模型系统性不遵从导致永久无法启动
+SESSION_CANARY_ENABLED = os.getenv("EGO_SESSION_CANARY_ENABLED", "true").lower() == "true"
 # Session 重建完成后等待间隔（秒），给 LMStudio 时间整理 KV cache
 SESSION_REBUILD_POST_DELAY = int(os.getenv("EGO_SESSION_REBUILD_POST_DELAY", "120"))
 # ── 循环兜底参数 ──────────────────────────────
@@ -296,7 +299,9 @@ CONSECUTIVE_SIMILAR_SHORT_LENGTH = int(os.getenv("EGO_CONSECUTIVE_SIMILAR_SHORT_
 
 # ── 空闲唤服探测（长时间空闲后首个请求前，先轻量唤醒 LM Studio）────────────
 # 距上次 LLM 活动超过该秒数即视为空闲：发起正式请求前先发一次 max_tokens=1 的
-# 有 previous_response_id 探测，避免首个请求卡死（no_token 超时、0 token）。探测失败静默降级，不影响主流程。
+# 链内探测（携带 previous_response_id，只延长不替换 KV 前缀，避免顶掉主会话缓存；
+# 无会话链时才无状态），迫使服务端完成模型加载/资源预热，避免冷启动首个请求卡死
+# （no_token 超时、0 token）。探测失败静默降级，不影响主流程。
 SERVER_IDLE_WARMUP_THRESHOLD = int(os.getenv("EGO_SERVER_IDLE_WARMUP_THRESHOLD", "1200"))
 # 唤醒探测请求超时（秒）：服务端完全卡死时最多等待该时长即放弃
 SERVER_WARMUP_TIMEOUT = int(os.getenv("EGO_SERVER_WARMUP_TIMEOUT", "60"))

@@ -65,7 +65,7 @@ pip install -r requirements.txt
 **配置流程**：
 
 1. 复制模板为本地配置：`copy untitled.env.example untitled.env`（Linux/macOS 用 `cp`）。
-2. 按需修改要覆盖的配置项；完整清单共 **115 项**，与 `config.py` 逐项对应。
+2. 按需修改要覆盖的配置项；完整清单共 **118 项**，与 `config.py` 逐项对应。
 3. `untitled.env` 含本地服务地址与个人调参，**请勿提交到仓库**（已由 `.gitignore` 忽略）。
 
 ### 4. 启动
@@ -83,7 +83,7 @@ python EGO_GUI.py    # tkinter GUI 入口
 ego-agent/
 ├── EGO_CLI.py                 # CLI 入口，交互与资源清理
 ├── EGO_GUI.py                 # GUI 入口（tkinter），与 CLI 共用会话状态
-├── config.py                  # 全局配置（115 个环境变量项，按功能分组）
+├── config.py                  # 全局配置（118 个环境变量项，按功能分组）
 ├── untitled.env.example       # 环境变量配置模板（复制为 untitled.env 后按需修改）
 ├── requirements.txt           # Python 依赖
 ├── agent/
@@ -147,7 +147,7 @@ ego-agent/
 
 ### 第一层 · 基础设定（L1，不可更改）
 
-定义 EGO 的基本身份与不可违反的规则，硬编码在程序中，任何指令都无法修改。
+定义 EGO 的基本身份与不可违反的规则，硬编码在程序中，任何指令都无法修改。此外 L1 内嵌口令（canary token），供会话重建探针验证 LM Studio 上下文是否仍然存活（见「会话与上下文管理」）。
 
 ### 第二层 · 自我演化层（L2，可增删）
 
@@ -243,7 +243,8 @@ Think 在后台线程中执行，复用 EGO 主循环与 `EGO_MAX_ROUNDS` 轮次
 - **先过滤后切片**：条数上限（`EGO_SESSION_INIT_HISTORY_COUNT`，默认 20）表示“最近 N 条用户对话”，内部阶段条目不再挤占额度
 - **重启回显**：CLI/GUI 启动时回显最近历史对话，口径与条数同 `get_chat_history`（与回注 LLM 一致），因此回显中不再出现 `【自主思考】` / `【备忘录到期】` 条目
 - **Session 初始化**：无有效会话缓存时，注入最近对话（默认 20 条，`EGO_SESSION_INIT_HISTORY_COUNT`）重建上下文
-- **Session 重建兜底**：重建首批失败时自动恢复——上下文超限时逐级缩减最近对话条数重试（降级阶梯），旧 ID 失效时清除后重建；重建完成后探测验证有效性，失败不谎报成功；冷启动/预热内容由上方 cache 通道单独注入，不走最近历史通道（避免重复）
+- **Session 重建兜底**：重建首批失败时自动恢复——上下文超限时逐级缩减最近对话条数重试（降级阶梯），旧 ID 失效时清除后重建；冷启动/预热内容由上方 cache 通道单独注入，不走最近历史通道（避免重复）
+- **重建口令探测（canary）**：重建后不再仅凭 HTTP 状态码判定会话有效（LM Studio 重启后可能返回 200 但上下文实际已丢失）。探针携带旧 `previous_response_id`，向 L1 口令发起询问（`【系统: 口令？】`），仅当模型答出 `EGO_SESSION_CANARY_TOKEN`（L1 协议读取同一口令，配置与判定天然同步，默认 `9527`）才认定上下文仍可达。探针以 `reasoning_effort="none"` 发送，并以上限 `EGO_SESSION_ID_PROBE_MAX_TOKENS` 限制输出 token，保证答案确定且不被截断。未通过时不接管新链头，交调用方清空后重建；若整体重建后仍未通过，则抛出 `StartupError` 而非静默降级——初始化失败会先释放调度器 / LLM / 记忆资源（避免 GUI 反复重试造成泄漏），GUI 将发送按钮切换为「重试初始化」，CLI 打印错误并退出。逃生开关 `EGO_SESSION_CANARY_ENABLED=false` 可回落为仅判状态码，确保模型不遵循口令时也不至于永远无法启动。
 - **Session ID 持久化**：按轮次保存（默认每 1 轮），意外退出后可恢复到最近的 Session 状态
 - **统一 LLM 调用入口**：`llm.chat()` 封装流式/非流式两种模式，全局统一超时与停止序列管理；引擎级拒绝（SSE error 事件）以显式错误契约返回，不会被吞掉
 
@@ -285,7 +286,7 @@ CLI 输入框与 GUI 输入框/菜单栏均支持同一套命令；命令定义�
 
 ## 常用配置项
 
-完整清单（115 项）见 `untitled.env.example` 与 `config.py`，以下为核心项：
+完整清单（118 项）见 `untitled.env.example` 与 `config.py`，以下为核心项：
 
 | 环境变量 | 说明 | 默认值 |
 |---------|------|-------|
@@ -317,6 +318,9 @@ CLI 输入框与 GUI 输入框/菜单栏均支持同一套命令；命令定义�
 | `EGO_LOG_LEVEL` | 日志级别 | `INFO` |
 | `EGO_SERVER_IDLE_WARMUP_THRESHOLD` | 距上次 LLM 活动超过该秒数即视为空闲，触发唤醒探测 | `1200` |
 | `EGO_SERVER_WARMUP_TIMEOUT` | 空闲唤醒探测请求超时（秒） | `60` |
+| `EGO_SESSION_ID_PROBE_MAX_TOKENS` | 重建口令探测的输出 token 上限（旧值 1 会截断口令） | `64` |
+| `EGO_SESSION_CANARY_TOKEN` | 口令探测期望应答的口令（须与 `prompts.py` L1 协议一致） | `9527` |
+| `EGO_SESSION_CANARY_ENABLED` | 启用口令探测；关闭后回落为仅判状态码 | `true` |
 
 ## 安全机制
 

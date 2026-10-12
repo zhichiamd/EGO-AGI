@@ -71,6 +71,9 @@ from config import (
     SESSION_REBUILD_BATCH_SIZE,  # Session 重建每批消息数
     SESSION_ID_PROBE_MAX_RETRIES,  # previous_response_id 探测重试次数
     SESSION_ID_PROBE_TIMEOUT,  # previous_response_id 探测请求超时（秒）
+    SESSION_ID_PROBE_MAX_TOKENS,  # 口令探测输出 token 上限（旧实现=1 会截断口令）
+    SESSION_CANARY_TOKEN,  # 口令探测期望应答口令（须与 prompts.py L1 一致）
+    SESSION_CANARY_ENABLED,  # 口令探测总开关（关闭则回落为状态码判定）
     SESSION_REBUILD_POST_DELAY,  # Session 重建后等待间隔（秒）
     TEMPERATURE_WARMUP,  # 系统侧低温度调用（预热/重建）
     SERVER_IDLE_WARMUP_THRESHOLD,  # 空闲唤服探测空闲阈值（秒）
@@ -92,6 +95,15 @@ def _auto_log(message: str, level: int = logging.INFO):
         level: 日志级别（logging.INFO / WARNING / ERROR）
     """
     logger.log(level, message)
+
+
+class StartupError(RuntimeError):
+    """会话上下文重建后口令校验仍未通过 → 启动失败。
+
+    由 GUI/CLI 顶层捕获：GUI 显示「初始化失败 / 重试初始化」，CLI 打印错误并提示。
+    继承 RuntimeError 以复用 CLI 既有的「请确认 LM Studio 已启动」提示分支。
+    """
+    pass
 
 
 def _is_executable(kind: str) -> bool:
@@ -229,12 +241,30 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         self._preheat_msgs: list[dict] = []
         
         # 【优化】智能判断是否需要冷启动/预热
-        # 如果 L2 认知库已有内容，说明系统已经"觉醒"过，跳过引导阶段直接进入交互
+        # 如果 L2 认知库已有内容，说明系统已经"孵化"成功，跳过引导阶段直接进入交互
         valid_entries = self.pm.get_valid_entries()
         if valid_entries:
             _auto_log(f"[信息] 检测到 L2 认知库已存在 {len(valid_entries)} 条有效认知，跳过冷启动/预热")
             _auto_log("[信息] 系统将基于现有认知直接进入用户交互模式")
-            self._initialize_session_with_cache()
+            try:
+                self._initialize_session_with_cache()
+            except Exception:
+                # 【F4】初始化失败（如 StartupError）：先释放已建资源再抛出，避免 GUI
+                # 「重试初始化」反复 new Agent 造成连接池 / 记忆句柄 / 定时器泄漏
+                # 先停调度器（取消已 reschedule 的 Timer），避免半初始化对象被后台任务引用
+                try:
+                    self.scheduler.stop_all()
+                except Exception:
+                    pass
+                try:
+                    self.llm.close()
+                except Exception:
+                    pass
+                try:
+                    self.mem.close()
+                except Exception:
+                    pass
+                raise
         else:
             # 执行冷启动和预热流程（仅在 L2 为空时执行）
             self._execute_coldstart_and_preheat()
@@ -2519,12 +2549,42 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             # 静默失败，不影响主流程
             _auto_log(f"[警告] 更新缓存中的 previous_response_id 失败: {e}", level=logging.WARNING)
     
+    @staticmethod
+    def _extract_responses_text(data: dict) -> str:
+        """从 /responses 响应提取全部可见文本（兼容 text / content 及 reasoning/summary 段）。
+
+        【F3】reasoning_effort="none" 理应不产出思考段，但 LM Studio 未必 100% 保证；
+        为降低假阴性，连同 reasoning/summary 类字段一并扫描——只要“口令”出现在
+        任一可见文本段，即可判定上下文可达。
+        """
+        parts: list[str] = []
+
+        def _collect(value):
+            if isinstance(value, str):
+                parts.append(value)
+            elif isinstance(value, list):
+                for seg in value:
+                    _collect(seg)
+            elif isinstance(value, dict):
+                # 仅取承载文本的字段，避免把 id/type 等噪声并入
+                for key in ("text", "content", "summary", "value"):
+                    if key in value:
+                        _collect(value[key])
+
+        for item in data.get("output", []) or []:
+            if isinstance(item, dict):
+                _collect(item)
+        return "\n".join(parts)
+
     def _validate_previous_response_id(self, response_id: str) -> bool:
         """
-        验证 previous_response_id 是否仍然有效
+        验证 previous_response_id 是否仍然有效（口令 canary 语义校验）
         
         发送一个轻量探测请求，检查服务器是否仍保留该 Session 上下文。
-        如果 LMStudio 已重启，服务器端会话会被清空，旧 ID 将失效。
+        如果 LMStudio 已重启，服务器端会话会被清空：此时可能返回 200 但上下文已丢失（静默失效）。
+        改用 L1 约定的“口令”作 canary：探测输入不含答案，应答与 SESSION_CANARY_TOKEN 一致
+        （即答对 L1 口令，改配置即同步改判据）即等价于上下文仍可达；
+        关闭 canary（SESSION_CANARY_ENABLED=false）时回落为仅判 200。
         
         Args:
             response_id: 待验证的 previous_response_id
@@ -2537,9 +2597,12 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             try:
                 probe_payload = {
                     "model": self.llm.model,
-                    "input": "【系统：重启后重连接探测，仅回复“OK”即可。】",
+                    # 【F1】严格对齐 L1 触发格式（半角冒号 + 空格）：【系统: 内容】
+                    "input": "【系统: 口令？】",
                     "temperature": 0.0,
-                    "max_tokens": 1,
+                    "max_tokens": SESSION_ID_PROBE_MAX_TOKENS,  # 【F2】旧实现=1 会截断口令
+                    "reasoning_effort": "none",                 # 强制不思考，保证确定性
+                    "stream": False,
                     "previous_response_id": response_id,
                 }
                 response = self.llm.session.post(
@@ -2549,16 +2612,25 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                     timeout=SESSION_ID_PROBE_TIMEOUT
                 )
                 try:
-                    if response.status_code == 200:
-                        data = response.json()
-                        new_id = data.get("id")
-                        if new_id:
-                            self.llm.set_session_id(new_id)
-                        _auto_log("[信息] ✓ previous_response_id 验证通过")
-                        return True
-                    else:
+                    if response.status_code != 200:
                         _auto_log(f"[警告] previous_response_id 验证失败 (HTTP {response.status_code})", level=logging.WARNING)
                         return False
+                    data = response.json()
+                    new_id = data.get("id")
+                    # 逃生开关：关闭 canary 时回落为原“仅判状态码”逻辑
+                    if not SESSION_CANARY_ENABLED:
+                        if new_id:
+                            self.llm.set_session_id(new_id)
+                        _auto_log("[信息] ✓ previous_response_id 验证通过（状态码，canary 已关闭）")
+                        return True
+                    # 口令 canary 语义校验：200 且模型答出口令，才认定上下文仍可达
+                    text = self._extract_responses_text(data)
+                    if new_id and SESSION_CANARY_TOKEN in text:
+                        self.llm.set_session_id(new_id)  # 仅通过时才接管新链头
+                        _auto_log("[信息] ✓ previous_response_id 验证通过（口令探测）")
+                        return True
+                    _auto_log("[警告] previous_response_id 口令探测未通过（上下文可能已清空）", level=logging.WARNING)
+                    return False  # 不接管 id，交调用方清空后重建
                 finally:
                     # 【修复】探测响应统一关闭：非 200 / 返回路径也归还连接池，避免连接残留占位
                     try:
@@ -2709,7 +2781,11 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                         if self._rebuild_session(rebuild_msgs, cache=cache):
                             _auto_log("[信息] ✓ Session 重建完成")
                         else:
-                            _auto_log("[警告] Session 重建失败，将以全新 Session 开始首轮对话", level=logging.WARNING)
+                            # 【启动失败】重建后口令校验仍未通过 → 不再静默降级，交由用户重试/重启
+                            raise StartupError(
+                                "会话上下文重建后口令校验未通过：LM Studio 未保留系统提示词/历史。"
+                                "请重启 LM Studio 或重载模型后点击「重试初始化」；若反复失败请检查口令配置。"
+                            )
                         self._skip_coldstart = True
                         return
                 
@@ -2719,7 +2795,11 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                 if self._rebuild_session(rebuild_msgs, cache=cache):
                     _auto_log("[信息] ✓ Session 重建完成，跳过冷启动和预热")
                 else:
-                    _auto_log("[警告] Session 重建失败，跳过冷启动和预热（首轮对话将自动重建上下文）", level=logging.WARNING)
+                    # 【启动失败】重建后口令校验仍未通过 → 交由用户重试/重启
+                    raise StartupError(
+                        "会话上下文重建后口令校验未通过：LM Studio 未保留系统提示词/历史。"
+                        "请重启 LM Studio 或重载模型后点击「重试初始化」；若反复失败请检查口令配置。"
+                    )
                 self._skip_coldstart = True
                 return
                 
@@ -2733,7 +2813,11 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
                 # 先重建已完成的 Session（续传属初始化未完成场景，需回灌冷启动/预热上下文，故显式 True）
                 rebuild_msgs = self._build_rebuild_messages(cache, include_coldstart=True)
                 if not self._rebuild_session(rebuild_msgs, cache=cache, restore_previous_id=previous_id):
-                    _auto_log("[警告] Session 重建失败，续传可能不可用", level=logging.WARNING)
+                    # 【启动失败】不完整缓存续传的重建也走同一闸门 → 交由用户重试/重启
+                    raise StartupError(
+                        "会话上下文重建后口令校验未通过（不完整缓存续传）：LM Studio 未保留系统提示词/历史。"
+                        "请重启 LM Studio 或重载模型后点击「重试初始化」；若反复失败请检查口令配置。"
+                    )
                 
                 # 设置标志，表示需要续传
                 self._resume_from_step = failed_step

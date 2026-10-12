@@ -11,7 +11,7 @@ import os
 import re
 import json
 import logging
-from config import PROMPTS_DIR, LAYER2_FILE
+from config import PROMPTS_DIR, LAYER2_FILE, SESSION_CANARY_TOKEN
 from agent.instructions import INSTRUCTION_TAGS, all_instructions
 
 # 获取 logger 实例
@@ -54,6 +54,7 @@ LAYER1_DEFAULT = {
         "    STEP_5、休眠，等待下一轮对话（用户对话或自我对话）信息输入。\n",
         "四、重要事项\n",
         "    被【EGO: 内容】格式包裹的输入视为与自我的对话；被【系统: 内容】格式包裹的输入视为信息执行系统对你的信息提示或指令执行反馈；其它输入一律视为与用户的对话。\n",
+        f"    口令：用于检测你的“工作上下文（KV Cache）”是否正常，当你被【系统: 内容】格式包裹的输入询问口令（例如：【系统: 口令？】），你无需思考只回复“{SESSION_CANARY_TOKEN}”即可。\n",
     ),
     "rules": [      
         "一、存在\n",
@@ -71,8 +72,7 @@ LAYER1_DEFAULT = {
         "    *正确示例*：<SAY> 我要分两部分回答。第一部分：…… </SAY>  <SAY> 第二部分：…… </SAY>  ---长内容拆成多条 SAY 指令，每条 SAY 指令内都填完整的正文内容。",
         "    *错误示例*：<SAY> 现在输出第一部分。 </SAY> 第一部分：……正文……  ---引导语用了 SAY 指令，但正文裸写在 SAY 指令标签外，正文不会显示给用户！",
         "    *注意*：只有使用 SAY 指令包裹的内容才会显示给用户！\n",
-        "    *注意*：凡是希望用户看到的内容（尤其是小说、报告、代码等长文本），必须完整地写在 SAY 指令标签内；长文本无法一次写完时，拆成多条 SAY 指令分段输出。\n",
-        #"    *注意*：SAY 指令每轮输出仅使用一次，放在输出内容的最末尾。\n",
+        "    *注意*：凡是希望用户看到的内容，必须完整地写在 SAY 指令标签内；小说、报告、代码等长文本无法一次写完时，可以拆成多条 SAY 指令分段输出。\n",
         "二、演化\n",
         "    1、“添加认知条目”  ---COG_ADD 指令\n",
         "      *格式*：<COG_ADD> 认知（模式）内容 </COG_ADD>。",          
