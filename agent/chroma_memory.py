@@ -1,7 +1,7 @@
 """
 ChromaDB 记忆管理模块
 
-使用 ChromaDB 作为向量数据库，Ollama 同时承担 BGE-M3 向量化与摘要。
+使用 ChromaDB 作为向量数据库，Ollama BGE-M3 做向量化，FLM 做摘要。
 
 记忆类型：
 - 会话记录：用户与系统的全部对话记录
@@ -27,13 +27,13 @@ from chromadb.api.types import EmbeddingFunction
 
 from config import (
     CHROMA_PERSIST_DIR,
-    OLLAMA_BASE_URL,
-    OLLAMA_EMBED_MODEL,
-    FLM_API_BASE,
-    FLM_MODEL,
-    FLM_SUMMARY_TEMPERATURE,
-    FLM_SUMMARY_MAX_TOKENS,
-    FLM_SUMMARY_TIMEOUT,
+    EMBED_API_BASE,
+    EMBED_MODEL,
+    SUMMARY_API_BASE,
+    SUMMARY_MODEL,
+    SUMMARY_TEMPERATURE,
+    SUMMARY_MAX_TOKENS,
+    SUMMARY_TIMEOUT,
     CHROMA_OBJECTIVE_COLLECTION,
     CHROMA_RECALL_TOP_K,
     MEMORY_CITATION_CYCLE_LENGTH,
@@ -44,16 +44,16 @@ from config import (
     MEMORY_SIMILARITY_THRESHOLD,  # MEMO_RD 相似度过滤阈值
     MEMORY_TIME_DECAY_SCALE_DAYS,  # 时间衰减半衰期（天）
     MEMORY_TIME_DECAY_FLOOR,  # 时间衰减权重下限
-    FLM_SUMMARY_TRIGGER_LENGTH,  # 超过该字符数触发摘要
-    FLM_SUMMARY_TARGET_LENGTH,  # 摘要目标字符数
-    OLLAMA_DETECT_TIMEOUT,  # Ollama 模型检测超时（秒）
-    OLLAMA_EMBED_TIMEOUT,  # Ollama 嵌入生成超时（秒）
+    SUMMARY_TRIGGER_LENGTH,  # 超过该字符数触发 FLM 摘要
+    SUMMARY_TARGET_LENGTH,  # FLM 摘要目标字符数
+    EMBED_DETECT_TIMEOUT,  # Ollama 模型检测超时（秒）
+    EMBED_TIMEOUT,  # Ollama 嵌入生成超时（秒）
     MEMORY_MAX_PENDING_STORES,  # 会话入库待执行任务上限（防单 worker 队列无限积压）
 )
 
 logger = logging.getLogger("ChromaMemory")
 
-# 【复用】摘要模型调用用长连接 Session：避免每次请求新建 TCP 连接（单 worker 串行，无并发）。
+# 【复用】FLM 摘要用长连接 Session：避免每次请求新建 TCP 连接（单 worker 串行，无并发）。
 _flm_session = requests.Session()
 
 
@@ -73,7 +73,7 @@ class OllamaEmbeddingFunction(EmbeddingFunction):
     使用 BGE-M3 模型，向量维度 1024。
     """
 
-    def __init__(self, base_url: str = OLLAMA_BASE_URL, model: str = OLLAMA_EMBED_MODEL):
+    def __init__(self, base_url: str = EMBED_API_BASE, model: str = EMBED_MODEL):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self._session = requests.Session()
@@ -82,7 +82,7 @@ class OllamaEmbeddingFunction(EmbeddingFunction):
     def _verify_model(self):
         """启动时验证 Ollama 中是否有目标模型"""
         try:
-            resp = self._session.get(f"{self.base_url}/api/tags", timeout=OLLAMA_DETECT_TIMEOUT)
+            resp = self._session.get(f"{self.base_url}/api/tags", timeout=EMBED_DETECT_TIMEOUT)
             resp.raise_for_status()
             models = [m.get("name", "") for m in resp.json().get("models", [])]
             # 支持模糊匹配（如 "bge-m3:latest" 匹配 "bge-m3"）
@@ -99,19 +99,19 @@ class OllamaEmbeddingFunction(EmbeddingFunction):
         resp = self._session.post(
             f"{self.base_url}/api/embed",
             json={"model": self.model, "input": input},
-            timeout=OLLAMA_EMBED_TIMEOUT,
+            timeout=EMBED_TIMEOUT,
         )
         resp.raise_for_status()
         return resp.json()["embeddings"]
 
 
 # ══════════════════════════════════════════════════════════════
-#  摘要工具（Ollama 小模型）
+#  FLM 摘要工具
 # ═══════════════════════════════════════════════════════════════
 
-def _flm_summarize(text: str, max_length: int = FLM_SUMMARY_TARGET_LENGTH) -> str:
+def _flm_summarize(text: str, max_length: int = SUMMARY_TARGET_LENGTH) -> str:
     """
-    使用 Ollama 小模型对长文本做摘要。
+    使用 FLM 小模型对长文本做摘要。
 
     Args:
         text: 原始文本
@@ -125,17 +125,17 @@ def _flm_summarize(text: str, max_length: int = FLM_SUMMARY_TARGET_LENGTH) -> st
 
     try:
         resp = _flm_session.post(
-            f"{FLM_API_BASE}/chat/completions",
+            f"{SUMMARY_API_BASE}/chat/completions",
             json={
-                "model": FLM_MODEL,
+                "model": SUMMARY_MODEL,
                 "messages": [
                     {"role": "system", "content": "你是信息摘要助手。任务是将输入文本压缩成高度凝练的信息，严格遵循以下规则：\n\n  1. 高密度信息保持原文：如诗歌、数学公式、精确数据等。\n  2. 低密度信息极限压缩：如寒暄、重复、解释性、情感抒发等内容，用最凝练的语言提取其核心意图、结论或关键动作。\n  3. 忠于原文：只允许使用对话原文已经出现的信息，禁止推断、润色添加原文不存在的观点。\n  4、输出格式：按时间顺序叙述；保留的高密度原文置于引号内，尽量醒目；整个摘要内容用一个段落表示，不要分段，不加多余标题。"},
                     {"role": "user", "content": f"请摘要（{max_length}字以内）：\n{text}"}
                 ],
-                "temperature": FLM_SUMMARY_TEMPERATURE,
-                "max_tokens": FLM_SUMMARY_MAX_TOKENS,
+                "temperature": SUMMARY_TEMPERATURE,
+                "max_tokens": SUMMARY_MAX_TOKENS,
             },
-            timeout=FLM_SUMMARY_TIMEOUT,
+            timeout=SUMMARY_TIMEOUT,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -143,7 +143,7 @@ def _flm_summarize(text: str, max_length: int = FLM_SUMMARY_TARGET_LENGTH) -> st
         if summary:
             return summary
     except Exception as e:
-        _auto_log(f"[警告] ⚠ 摘要失败: {e}，使用截断", level=logging.WARNING)
+        _auto_log(f"[警告] ⚠ FLM 摘要失败: {e}，使用截断", level=logging.WARNING)
 
     # 降级：直接截断
     return text[:max_length] + "..."
@@ -188,7 +188,7 @@ class ChromaMemoryManager:
         }
         # 【异步化】统计自增锁（后台入库线程与主线程 recall 并发访问）
         self._stats_lock = threading.Lock()
-        # 【异步化】会话记录入库走后台单线程队列：摘要 / Ollama embedding 为慢 IO，
+        # 【异步化】会话记录入库走后台单线程队列：FLM 摘要 / Ollama embedding 为慢 IO，
         # 不阻塞主对话流程；单 worker 保证 FIFO 入库顺序与限并发
         self._store_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mem-store")
         # 【修复】待执行入库任务计数：服务变慢时单 worker 队列本会无界积压占内存，
@@ -203,7 +203,7 @@ class ChromaMemoryManager:
 
         仅存储用户对话阶段（stage=None 或 "chat"），
         内部阶段（coldstart/preheat/think/reflection）不存入。
-        长文本会自动通过 Ollama 小模型做摘要后存储。
+        长文本会自动通过 FLM 做摘要后存储。
 
         注意：摘要与入库在后台单线程队列中执行，立即返回，不阻塞主对话流程；
         程序退出时已提交的任务由 close() 等待完成（失败不影响主流程）。
@@ -232,16 +232,16 @@ class ChromaMemoryManager:
         self._store_executor.submit(self._store_conversation_async, role, content, stage, doc_id)
 
     def _store_conversation_async(self, role: str, content: str, stage: str, doc_id: str):
-        """后台线程执行：摘要（长文本）→ 构造文档 → ChromaDB 入库（embedding 自动完成）
+        """后台线程执行：FLM 摘要（长文本）→ 构造文档 → ChromaDB 入库（embedding 自动完成）
 
         【修复】异常保护：记忆写入是辅助功能，失败（Ollama/ChromaDB 不可用）不应击穿主对话流程
         """
         try:
-            # 长文本摘要（超过 FLM_SUMMARY_TRIGGER_LENGTH 字符时）
+            # 长文本摘要（超过 SUMMARY_TRIGGER_LENGTH 字符时）
             store_text = content
             original_length = len(content)
-            if original_length > FLM_SUMMARY_TRIGGER_LENGTH:
-                store_text = _flm_summarize(content, max_length=FLM_SUMMARY_TARGET_LENGTH)
+            if original_length > SUMMARY_TRIGGER_LENGTH:
+                store_text = _flm_summarize(content, max_length=SUMMARY_TARGET_LENGTH)
                 _auto_log(f"[信息] 📝 会话记录已摘要: {original_length} → {len(store_text)} 字符")
 
             role_cn = "用户" if role == "user" else "EGO"
@@ -523,13 +523,13 @@ class ChromaMemoryManager:
         """关闭连接（ChromaDB 持久化客户端无需特别关闭）"""
         # 【修复】等待已提交任务完成再关闭：原 wait=False + cancel_futures=True 会
         # 静默丢弃排队中的会话入库（已提交的任务应尽力完成）；每个任务内部有异常保护
-        # 且有界超时（摘要 FLM_SUMMARY_TIMEOUT / embedding OLLAMA_EMBED_TIMEOUT），
+        # 且有界超时（FLM 摘要 SUMMARY_TIMEOUT / embedding EMBED_TIMEOUT），
         # wait=True 的阻塞时间有界，不会挂死退出流程
         if hasattr(self, "_store_executor"):
             self._store_executor.shutdown(wait=True)
         if hasattr(self._embed_fn, '_session'):
             self._embed_fn._session.close()
-        # 【复用】关闭摘要长连接 Session（入库线程已 drain，安全）。
+        # 【复用】关闭 FLM 摘要长连接 Session（入库线程已 drain，安全）。
         try:
             _flm_session.close()
         except Exception:

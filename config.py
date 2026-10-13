@@ -33,45 +33,41 @@ LOG_TO_CONSOLE = os.getenv("EGO_LOG_TO_CONSOLE", "false").lower() == "true"
 LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
-# ── 主模型配置 ──────────────────────────────
+# ── 主对话模型配置 ──────────────────────────────
 LM_API_BASE      = os.getenv("EGO_LM_API_BASE", "http://localhost:1234/v1")
 LM_MODEL         = os.getenv("EGO_LM_MODEL", "default-model")
 
-# ── Ollama 摘要模型配置 ──────────────────────────────
-FLM_API_BASE     = os.getenv("EGO_FLM_API_BASE", "http://localhost:11434/v1")
-FLM_MODEL        = os.getenv("EGO_FLM_MODEL", "gemma4-it:e4b")
+# ── 摘要模型配置 ──────────────────────────────
+SUMMARY_API_BASE = os.getenv("EGO_SUMMARY_API_BASE", "http://localhost:52625/v1")  #默认使用FLM
+SUMMARY_MODEL    = os.getenv("EGO_SUMMARY_MODEL", "gemma4-it:e4b")
+SUMMARY_TEMPERATURE     = float(os.getenv("EGO_SUMMARY_TEMPERATURE", "0.5"))
+SUMMARY_MAX_TOKENS      = int(os.getenv("EGO_SUMMARY_MAX_TOKENS", "1024"))
+SUMMARY_TIMEOUT         = int(os.getenv("EGO_SUMMARY_TIMEOUT", "120"))  # 秒
+# 会话记录超过该字符数时先用 FLM 摘要再入库
+SUMMARY_TRIGGER_LENGTH  = int(os.getenv("EGO_SUMMARY_TRIGGER_LENGTH", "1000"))
+# FLM 摘要目标字符数
+SUMMARY_TARGET_LENGTH   = int(os.getenv("EGO_SUMMARY_TARGET_LENGTH", "600"))
 
-FLM_SUMMARY_TEMPERATURE = float(os.getenv("EGO_FLM_SUMMARY_TEMPERATURE", "0.5"))
-#FLM_SUMMARY_MAX_TOKENS  = int(os.getenv("EGO_FLM_SUMMARY_MAX_TOKENS", "512"))
-FLM_SUMMARY_MAX_TOKENS  = int(os.getenv("EGO_FLM_SUMMARY_MAX_TOKENS", "1024"))
-FLM_SUMMARY_TIMEOUT     = int(os.getenv("EGO_FLM_SUMMARY_TIMEOUT", "120"))  # 秒
-# 会话记录超过该字符数时先用摘要小模型压缩再入库
-FLM_SUMMARY_TRIGGER_LENGTH = int(os.getenv("EGO_FLM_SUMMARY_TRIGGER_LENGTH", "1000"))
-# 摘要目标字符数
-FLM_SUMMARY_TARGET_LENGTH = int(os.getenv("EGO_FLM_SUMMARY_TARGET_LENGTH", "600"))
-
-# ── Ollama 指令归一化层配置（LLM 转译自然语言 payload → 标准协议，失败透传）────────
+# ── 指令归一化模型配置（LLM 转译自然语言 payload → 标准协议，失败透传）────────
 NORM_ENABLED = os.getenv("EGO_NORM_ENABLED", "true").lower() == "true"
-NORM_API_BASE = os.getenv("EGO_NORM_API_BASE", "http://localhost:11434/v1")
+NORM_API_BASE = os.getenv("EGO_NORM_API_BASE", "http://localhost:52625/v1")  #默认使用FLM
 NORM_MODEL = os.getenv("EGO_NORM_MODEL", "gemma4-it:e4b")
-
 NORM_TEMPERATURE = float(os.getenv("EGO_NORM_TEMPERATURE", "0.0"))
-#NORM_MAX_TOKENS = int(os.getenv("EGO_NORM_MAX_TOKENS", "256"))
 NORM_MAX_TOKENS = int(os.getenv("EGO_NORM_MAX_TOKENS", "1024"))
 NORM_TIMEOUT = int(os.getenv("EGO_NORM_TIMEOUT", "60"))  # 秒；实测 NOTE_ADD ~10s / 检索类 ~6s
 # 幂等判定：短于该长度的 MEMO_RD payload 视为已归一化的关键词（如“健身计划”），直接透传；
 # NOTE_RD 不做短词直通（note.search 为纯子串匹配，自然语言短句直通必然失配）
 NORM_MIN_LENGTH = int(os.getenv("EGO_NORM_MIN_LENGTH", "6"))
-# 连续失败熔断：超过该次数则冷却 NORM_CIRCUIT_COOLDOWN 秒跳过转译（防归一化服务挂起拖慢对话）
+# 连续失败熔断：超过该次数则冷却 NORM_CIRCUIT_COOLDOWN 秒跳过转译（防 52625 挂起拖慢对话）
 NORM_CIRCUIT_BREAK = int(os.getenv("EGO_NORM_CIRCUIT_BREAK", "3"))
 NORM_CIRCUIT_COOLDOWN = int(os.getenv("EGO_NORM_CIRCUIT_COOLDOWN", "300"))
 
-# ── Ollama Embedding 配置 ──────────────────────────────
-OLLAMA_BASE_URL   = os.getenv("EGO_OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_EMBED_MODEL = os.getenv("EGO_OLLAMA_EMBED_MODEL", "bge-m3")
-# Ollama 模型检测 / 嵌入生成 HTTP 超时（秒）
-OLLAMA_DETECT_TIMEOUT = int(os.getenv("EGO_OLLAMA_DETECT_TIMEOUT", "10"))
-OLLAMA_EMBED_TIMEOUT  = int(os.getenv("EGO_OLLAMA_EMBED_TIMEOUT", "60"))
+# ── 嵌入（向量）模型配置 ──────────────────────────────
+EMBED_API_BASE = os.getenv("EGO_EMBED_API_BASE", "http://localhost:11434")  #默认使用Ollama
+EMBED_MODEL    = os.getenv("EGO_EMBED_MODEL", "bge-m3")
+# 模型检测 / 嵌入生成 HTTP 超时（秒）
+EMBED_DETECT_TIMEOUT = int(os.getenv("EGO_EMBED_DETECT_TIMEOUT", "10"))
+EMBED_TIMEOUT        = int(os.getenv("EGO_EMBED_TIMEOUT", "60"))
 
 # ── 联网检索配置（WEB_SRCH 指令，Tavily REST 直连）─────────────
 # 未启用 / 未配置 Key / 服务不可达 → 指令返回失败消息并回注 LLM，不影响主流程
