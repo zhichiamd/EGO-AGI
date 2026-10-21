@@ -366,6 +366,7 @@ User input is passed directly to the LLM; EGO's internal thoughts (`<THINK>`) ar
 
 - Runtime log: `data/logs/ego.log` (level controlled by `EGO_LOG_LEVEL`; `EGO_LOG_TO_CONSOLE` enables synchronized console output)
 - LLM response snapshots: `data/debug_logs/` (full response archives for each stage of coldstart/preheat/main loop, for troubleshooting model output issues); non-chat debug filenames now carry a round suffix — loop stages (Think/note) use `_step{n}_round{m}`, while non-loop stages (preheat/coldstart/reflection/note-review/selfdef) keep the `_step{n}` naming
+- **Published samples**: [`data/debug_logs/`](data/debug_logs) keeps a curated set of real EGO outputs — chat replies, self-dialogue steps, introspection, the daily self-definition, and note review — so the behaviour described above can be inspected without running anything
 
 ## The Question This Repository Asks
 

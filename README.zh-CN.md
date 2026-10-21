@@ -366,6 +366,7 @@ EGO 会拒绝两类用户请求：
 
 - 运行日志：`data/logs/ego.log`（级别由 `EGO_LOG_LEVEL` 控制，`EGO_LOG_TO_CONSOLE` 可开启控制台同步输出）
 - LLM 响应快照：`data/debug_logs/`（冷启动/预热/主循环各阶段的完整响应存档，便于排查模型输出问题）；非对话阶段的调试文件名新增轮次后缀——Think/备忘录等循环型阶段为 `_step{n}_round{m}`，非循环阶段（preheat/coldstart/reflection/note-review/selfdef）保持 `_step{n}` 命名
+- **公开样本**：[`data/debug_logs/`](data/debug_logs) 收录了一组真实的 EGO 原始响应——对话回复、自对话各步、自省、每日自我定义与备忘录审查——无需运行即可检视上文描述的行为
 
 ## 这个仓库在问一个问题
 

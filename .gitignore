@@ -11,6 +11,9 @@ data/*
 !data/sys.json
 !data/prompts/
 
+# ── 调试样本（精选的 EGO 原始响应，随仓库发布供参考）──
+!data/debug_logs/
+
 # ── EGO 生成的输出产物（如需作为示例展示，可将其加入白名单）──
 输出/
 
