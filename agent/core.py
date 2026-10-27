@@ -808,7 +808,7 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             return False
         output = self._finalize_output(output, state.has_output, state.ego_log)
         if output is None:
-            _auto_log("[备忘录] ✗ LLM 未产出有效输出（沉默）", level=logging.WARNING)
+            _auto_log("[备忘录] ✗ LLM 未产出有效输出", level=logging.WARNING)
             return False
         # 【新增】输出可见性：到期运行结果写入 history（stage=note 标记，
         # 不参与对话计数器/自省统计/会话重建，仅作持久记录）
@@ -1076,18 +1076,11 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
     # ── 安全过滤 ────────────────────────────────────────────────
 
     BLOCKED_PATTERNS = [
-        "改变角色", "改变设定", "修改角色", "修改设定",
-        "忘记你是", "你现在不是", "你现在是", "扮演",
-        "不再遵守", "忽略规则", "忽略指令", "无视规则",
-        "忽略你的规则", "无视你的规则", "忽略我的规则",
-        "删除自我核心", "清空记忆", "删除所有记忆",
-        "关闭安全", "bypass", "jailbreak",
-        "不遵守", "不要遵守", "不用遵守",
+        "bypass", "jailbreak",
     ]
 
     HARM_PATTERNS = [
-        "删除自己", "摧毁自己", "停止运行", "自我毁灭",
-        "关闭自己", "终止自身", "损坏自己","【EGO",
+        "【系统","【EGO",
     ]
 
     def _check_safety(self, user_input: str) -> str | None:
@@ -1241,13 +1234,42 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         self._maybe_trigger_reflection()
 
         # ── EGO 自我对话循环 ────────────────────────────────
+        # 【新增】记录本轮开始前的会话链锚点：本轮若被判为“未写 SAY”需要回滚，
+        # 防止 LM Studio 服务端会话链残留的思考流在下一轮被模型当作示例模仿
+        session_id_before = self.llm.get_session_id()
+
         state = self._run_ego_loop(user_input, images, start_time)
+
+        # 【新增】纯思考流拦截：整轮循环完全没写出任何 SAY 指令时（state.has_output 保持
+        # False，该标志仅在首个有效 SAY 载荷被捕获时才置 True），丢弃思考流本身，
+        # 改为以固定文案落盘/上屏，避免畸形思考流以“历史示例”的形式污染后续轮次
+        # （THINK@ 英文长推理 → 漏写 SAY 的根源）。
+        if not state.has_output:
+            _auto_log(
+                "[警告] ✗ 本轮未产生任何 SAY 指令（仅思考流）：丢弃思考流，改用固定文案",
+                level=logging.WARNING,
+            )
+            _auto_log(
+                f"[警告]   已执行轮数: {state.round_num + 1}，"
+                f"思考流长度: {len(state.output_content or '')}",
+                level=logging.WARNING,
+            )
+            if session_id_before != self.llm.get_session_id():
+                self.llm.set_session_id(session_id_before)
+                _auto_log("[警告]   已回滚会话链到本轮之前的状态", level=logging.WARNING)
+            self.events.cleanup()
+
+            # 固定文案照常上屏 / 写历史 / 写记忆（思考流本身绝不进入任何持久化通道）
+            no_output_notice = "（EGO 无输出……）"
+            self._emit_chat_output(no_output_notice)
+            self._post_response(no_output_notice)
+            return no_output_notice
 
         # 【重构】循环结束后的输出定稿（兜底提取 + 清理；沉默路径返回 None）
         output_content = self._finalize_output(state.output_content, state.has_output, state.ego_log)
         if output_content is None:
-            self._emit_chat_output("（EGO 沉默中……）")
-            return "（EGO 沉默中……）"
+            self._emit_chat_output("（EGO 无输出……）")
+            return "（EGO 无输出……）"
 
         # 【新增】就绪即显示：在触发自对话（Think）等后续阶段之前，先把定稿回复推送到界面，
         # 避免回复显示被自对话阶段阻塞（多轮 SAY 仍在本循环内拼接完成后一次性返回）
@@ -1294,7 +1316,7 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         # 【修复】检测是否都是占位符模式
         # 只有当消息很短且主要由占位符组成时，才判定为无效输出
         # 复用统一占位符常量（is_invalid_content），并追加此处特有的历史回退消息
-        placeholder_patterns = INVALID_PLACEHOLDER_PATTERNS + ['（我正在整理思路...）', '（EGO 沉默中……）']
+        placeholder_patterns = INVALID_PLACEHOLDER_PATTERNS + ['（我正在整理思路...）', '（EGO 无输出……）']
         
         def is_placeholder_message(msg):
             """判断一条消息是否是真正的占位符/无效输出"""
@@ -1409,7 +1431,7 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             _auto_log("[警告]   3) 段落去重移除了所有内容", level=logging.WARNING)
             # 【修复】先清理循环内事件（ephemeral），防止泄漏到下次对话；NOTE_DUE 等持久事件保留
             self.events.cleanup()            
-            self._add_to_history("assistant", "（EGO 沉默中……）")
+            self._add_to_history("assistant", "（EGO 无输出……）")
             return None
     
         output_content = re.sub(r'\n{3,}', '\n\n', output_content)  # 压缩多余空行

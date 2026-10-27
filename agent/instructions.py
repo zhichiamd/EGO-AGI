@@ -55,13 +55,17 @@ _SAY_EXTRA_PLACEHOLDERS = frozenset(INVALID_PLACEHOLDER_PATTERNS) | {
     'Chinese output content', '[The summary/reflection]', '中文输出内容'
 }
 
+# 中日韩字符（短文本豁免用）：中文极短回复（"我在。""好。""嗯"）是有效输出，
+# 不应被长度阈值误杀；占位符/分隔符仍由下方的模式与正则兜底
+_CJK_RE = re.compile(r'[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]')
+
 
 def is_invalid_content(text: str, say_level: bool = False) -> bool:
     """
     统一的无效内容检测（替代原先多处重复且不一致的内联实现）
 
     基础检测（所有场景）：
-    - 内容为空，或 strip 后过短（<= 3 字符）
+    - 内容为空，或 strip 后过短（<= 3 字符且不含中日韩字符）
     - 命中常见占位符/分隔符（INVALID_PLACEHOLDER_PATTERNS）
     - 纯分隔符（^[-=]{3,}$）或纯点号（^.+$）
 
@@ -76,7 +80,9 @@ def is_invalid_content(text: str, say_level: bool = False) -> bool:
     if is_blank_text(text):
         return True
     stripped = text.strip()
-    if len(stripped) <= 3:
+    # 长度拦截只针对非中日韩文本：占位符/分隔符几乎都是 ASCII 符号，
+    # 而"我在。""好。""收到"这类中文短回复是正常输出，不能按长度丢弃
+    if len(stripped) <= 3 and not _CJK_RE.search(stripped):
         return True
     if stripped in INVALID_PLACEHOLDER_PATTERNS:
         return True
@@ -688,7 +694,7 @@ class InstructionExecutor:
     # 注册时 protocol 留空避免重复注入；加入 INSTRUCTION_TAGS 保持内置清单语义完整。
     # 优先级：NOTE_RD=0（检索优先，与 MEMO_RD 同级）/ NOTE_ADD=1 / NOTE_DEL=2
 
-    # 【降级自愈】归一化层不可用时（Ollama 服务故障/熔断），payload 以自然语言透传到 handler，
+    # 【降级自愈】归一化层不可用时（52625 故障/熔断），payload 以自然语言透传到 handler，
     # 失败消息携带完整协议格式，供 LLM 下一轮直接按协议输出，避免反复失败
     _NOTE_ADD_FORMAT_HINT = "正确格式：[性质：执行] [触发时间：YYYY-MM-DD-HH:MM] [标题:xxx] [内容:xxx]（备忘类省略触发时间）"
 
@@ -777,7 +783,7 @@ class InstructionExecutor:
     # 协议文案见 prompts.py LAYER1_DEFAULT.rules「（四）联网检索」，注册时 protocol 留空避免重复注入。
     # 【共享预算】与 MEMO_RD / NOTE_RD 共用轮次限额（循环兜底防检索空转），不单独计数。
     # 【失败自愈】on_failure_feedback 将人话失败原因（未配 Key / 超时 / 配额）回注下一轮。
-    # 【不归一化】payload 本身就是自然语言检索词，无需经归一化层转译（normalize 留空）。
+    # 【不归一化】payload 本身就是自然语言检索词，无需经 FLM 转译（normalize 留空）。
     # 【阶段门控】allowed_stages=("chat", "think", "note")：检索结果须回注下一轮方能被消费。
     # chat/think/note 均走 _run_ego_loop 事件通道回注；冷启动/预热为直 execute() 后丢弃
     # 结果，故这些阶段由 execute() 统一静默跳过（不做无谓网络请求/配额消耗，也不产生告警噪音）。

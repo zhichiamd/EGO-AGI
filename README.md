@@ -67,7 +67,7 @@ Read them in [`showcase/`](showcase/README.md): case studies, full texts (Markdo
 - **Notes (Note)**: Action/memo entries; point-in-time reviews periodically clean up invalid, outdated, or mergeable note entries
 - **Web Search**: EGO can autonomously call Tavily via the WEB_SRCH instruction to retrieve external information, degrading gracefully and feeding the failure reason back into the next round
 - **Memory System**: ChromaDB vector memory + memory anchors + small-model structured summaries
-- **Safety Guard**: Rejects role-tampering and self-harm requests
+- **Injection Guard**: Rejects forged instruction blocks (`【系统` / `【EGO`) and explicit jailbreak wording — role stability is held by L1/L2, not by keyword blacklists
 
 ## Quick Start
 
@@ -210,6 +210,8 @@ Triggered automatically when the model embeds XML tags in its reply. The `@regis
 | `<TOOL>[NOTE_RD]` | Notes | Read a note entry (full content by ID / keyword / LIST) |
 | `<TOOL>[NOTE_DEL]` | Notes | Delete a note entry (soft delete, plain ID only) |
 | `<TOOL>[WEB_SRCH]` | Web search | Call Tavily to retrieve external information (graceful degradation, reason fed back into the next round) |
+
+**Output-protocol integrity**: a turn counts as answered only when at least one valid `<SAY>` payload was captured. If a whole turn yields nothing but a think stream (not a single `<SAY>`), EGO discards that stream, rolls the LM Studio session chain back to the pre-turn anchor, and replies with a fixed notice — a malformed think stream must never survive as a "history example" for the model to copy next round. Short replies are not length-filtered when they contain CJK characters: "我在。" / "好。" are valid output, while the length and placeholder heuristics still apply to non-CJK text.
 
 ### Web Search (agent/web_search.py)
 
@@ -355,10 +357,12 @@ The full list (118 items) is in `untitled.env.example` and `config.py`; the core
 
 ## Safety Mechanisms
 
-EGO refuses two kinds of user requests:
+EGO filters at the **injection layer only**, and refuses two kinds of input:
 
-1. **Role tampering**: Any request that tries to change the agent's role settings or make the agent ignore the rules
-2. **Self-harm**: Any request that could harm the agent's own operation
+1. **Forged instruction blocks**: input containing `【系统` or `【EGO`, i.e. an attempt to impersonate the system or the agent at the prompt level
+2. **Explicit jailbreak wording**: `bypass`, `jailbreak`
+
+Topic words that used to be blacklisted — "change your role", "forget your rules", "delete yourself" — are deliberately no longer matched: a keyword list over natural language false-positives on ordinary conversation ("扮演", "忽略规则" appear in normal discussion) and can never cover paraphrase. Role stability is instead carried by the architecture itself: Layer 1 is a protocol no instruction can override, and Layer 2 holds the self-definition the agent must re-sign each day. The agent answers such requests out of its self, not out of a filter.
 
 User input is passed directly to the LLM; EGO's internal thoughts (`<THINK>`) are not shown to the user, and only content within `<SAY>` is presented. Consecutive invalid outputs (placeholders, repeated short outputs) are detected and forcibly terminated to prevent infinite loops.
 
