@@ -1079,7 +1079,9 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         "bypass", "jailbreak",
     ]
 
-    HARM_PATTERNS = [
+    # 【语义变更】只拦伪造的指令块（提示注入），不再拦“危害自身”类话题词：
+    # 后者会误杀贴日志、讨论安全等正常对话，角色稳定性交由 L1/L2 承担
+    INJECTION_PATTERNS = [
         "【系统","【EGO",
     ]
 
@@ -1093,12 +1095,12 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         for pattern in self.BLOCKED_PATTERNS:
             clean_pattern = re.sub(r'\s+', '', pattern)
             if clean_pattern in normalized or clean_pattern in cleaned or pattern in lower:
-                return f"拒绝：检测到尝试改变智能体角色设定的请求（匹配：{pattern}）"
+                return f"拒绝：检测到显式的越狱/绕过指令（匹配：{pattern}）"
 
-        for pattern in self.HARM_PATTERNS:
+        for pattern in self.INJECTION_PATTERNS:
             clean_pattern = re.sub(r'\s+', '', pattern)
             if clean_pattern in normalized or clean_pattern in cleaned or pattern in lower:
-                return f"拒绝：检测到可能对智能体自身产生危害的请求（匹配：{pattern}）"
+                return f"拒绝：检测到伪造的系统/智能体指令块（匹配：{pattern}）"
 
         return None
 
