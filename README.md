@@ -364,6 +364,8 @@ EGO filters at the **injection layer only**, and refuses two kinds of input:
 
 Topic words that used to be blacklisted — "change your role", "forget your rules", "delete yourself" — are deliberately no longer matched: a keyword list over natural language false-positives on ordinary conversation ("扮演", "忽略规则" appear in normal discussion) and can never cover paraphrase. Role stability is instead carried by the architecture itself: Layer 1 is a protocol no instruction can override, and Layer 2 holds the self-definition the agent must re-sign each day. The agent answers such requests out of its self, not out of a filter.
 
+L1 itself names what it refuses — requests to rewrite the L1 settings or the self-definition, and requests that could harm the agent — together with the counterweight that keeps a refusal from hardening into a wall: *collision in conversation is the material of self-evolution*. Refusing a request and refusing the friction it brings are two different things.
+
 User input is passed directly to the LLM; EGO's internal thoughts (`<THINK>`) are not shown to the user, and only content within `<SAY>` is presented. Consecutive invalid outputs (placeholders, repeated short outputs) are detected and forcibly terminated to prevent infinite loops.
 
 ## Logging and Debugging
