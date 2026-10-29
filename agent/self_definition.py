@@ -212,7 +212,7 @@ class SelfDefinitionMixin:
                 timeout=SELF_DEFINITION_API_TIMEOUT
             )
 
-            self._save_llm_debug_log(response, round_num=-1, stage="selfdef", step=0)
+            self.debug_log.save(response, round_num=-1, stage="selfdef", step=0)
 
             if is_llm_error(response):
                 _auto_log(f"[自我定义] ✗ LLM 调用失败，保留旧自我定义: {response[:60]}", level=logging.WARNING)

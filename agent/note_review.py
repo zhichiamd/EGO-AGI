@@ -233,7 +233,7 @@ class NoteReviewMixin:
             )
 
             # 保存审查阶段的 LLM 响应到 debug log
-            self._save_llm_debug_log(review_response, round_num=-1, stage=stage_label, step=0)
+            self.debug_log.save(review_response, round_num=-1, stage=stage_label, step=0)
 
             review_instructions = filter_empty_payload(parse_instructions(review_response))
 

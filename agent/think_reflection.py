@@ -113,8 +113,8 @@ class ThinkReflectionMixin:
         _auto_log(f"[定时任务] ⏰ 触发自对话任务（{datetime.now().strftime('%Y年%m月%d日 %H:%M')}）")
         _auto_log(f"{'='*60}\n")
         # 【空闲唤醒】auto_think 为低频定时任务，空闲后首个请求易卡死：先轻量唤醒服务端
-        if self._should_warmup():
-            self._warmup_server()
+        if self.session.should_warmup():
+            self.session.warmup_server()
         self._execute_think_cycle()
         _auto_log("\n[定时任务] ✓ 自对话任务完成\n")
 
@@ -324,7 +324,7 @@ class ThinkReflectionMixin:
 
         在与用户进行 N 轮对话后触发
 
-        【重构】每个 Think 步骤改为一次完整 EGO 循环（复用 _run_ego_loop），与用户
+        【重构】每个 Think 步骤改为一次完整 EGO 循环（复用 EgoLoopRunner.run），与用户
         对话同构：所有指令正常执行（含 MEMO_RD/NOTE_RD/WEB_SRCH 检索类、CONTINUE、
         COG_ADD/COG_DEL/NOTE_ADD），检索结果经事件通道回注下一轮继续推理；
         步骤产生的 SAY 输出定稿后经 on_think_output 推送 GUI/CLI 显示。
@@ -346,9 +346,9 @@ class ThinkReflectionMixin:
             
             try:
                 # 【重构】复用完整 EGO 循环：检索类放行 + 结果回注 + 多轮 CONTINUE；
-                # 显式传入 TEMPERATURE_THINK，避免被 _run_ego_loop 的 self.llm.temperature
+                # 显式传入 TEMPERATURE_THINK，避免被 EgoLoopRunner.run 的 self.llm.temperature
                 # （EGO_TEMPERATURE）覆盖，确保 EGO_TEMPERATURE_THINK 配置持续生效
-                state = self._run_ego_loop(
+                state = self.loop.run(
                     user_input=prompt,
                     images=None,
                     start_time=time.time(),
@@ -356,11 +356,11 @@ class ThinkReflectionMixin:
                     base_temperature_override=TEMPERATURE_THINK,
                     step=i,
                 )
-                self._touch_llm_activity()  # 记录本次服务端活动，刷新空闲判定
+                self.session.touch_activity()  # 记录本次服务端活动，刷新空闲判定
 
                 # 【新增】仅展示 SAY 产出的有效输出（与用户对话输出同构）；
                 # 无 SAY 时（纯思考/仅执行指令）保持静默，不写历史
-                # 【修复】先过滤 LLM 错误串：_run_ego_loop 遇错会覆写 output_content 但
+                # 【修复】先过滤 LLM 错误串：EgoLoopRunner.run 遇错会覆写 output_content 但
                 # 不重置 has_output，若某轮已产出 SAY 后再报错，错误串会被误当有效输出
                 # 写入 history（stage=think）并推送界面，故与 note 路径对齐做前置校验
                 if is_llm_error(state.output_content):
@@ -446,7 +446,7 @@ class ThinkReflectionMixin:
             reflection_response = self.llm.chat(reflection_messages, TEMPERATURE_REFLECTION, stage=stage_label, timeout=REFLECTION_API_TIMEOUT)
             
             # 保存自省阶段的 LLM 响应到 debug log
-            self._save_llm_debug_log(reflection_response, round_num=-1, stage=stage_label, step=0)
+            self.debug_log.save(reflection_response, round_num=-1, stage=stage_label, step=0)
             
             reflection_instructions = filter_empty_payload(parse_instructions(reflection_response))
             
@@ -554,11 +554,8 @@ class ThinkReflectionMixin:
         条件2：L2 认知条目数量超过 REFLECTION_L2_THRESHOLD 阈值（仅首次达到时触发一次）
         """
         
-        # 只统计 CHAT 阶段的用户消息（排除 coldstart、preheat、think、note 阶段）
-        chat_user_count = sum(
-            1 for msg in self.history 
-            if msg["role"] == "user" and msg.get("stage") not in ["coldstart", "preheat", "think", "note"]
-        )
+        # 只统计 CHAT 阶段的用户消息（口径与会话重建一致：白名单 CHAT_HISTORY_STAGES）
+        chat_user_count = self.hist.count_chat_user_turns()
         
         # 获取当前 L2 条目数量
         current_l2_count = len(self.pm.get_valid_entries())

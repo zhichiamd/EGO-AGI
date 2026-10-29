@@ -134,6 +134,9 @@ class LMStudioClient:
         # Responses API 相关
         self.responses_url = f"{self.api_base}/responses"
         self._previous_response_id = None
+        # 【新增】最近一次调用返回的 response_id（无论是否被接管为会话链头）。
+        # 探测类调用传 apply_session=False 时用它读取新链头，而不改动主链
+        self.last_response_id: Optional[str] = None
         
         # 如果模型是 default-model，尝试从 LM Studio 获取实际模型
         _auto_log("[信息] 开始加载模型.........")
@@ -179,7 +182,9 @@ class LMStudioClient:
         except Exception as e:
             _auto_log(f"[警告] 检测模型失败: {e}，使用默认模型: {self.model}", level=logging.WARNING)
         
-    def _call_responses_api(self, input_content: str, temperature: float, timeout: int = None, _retry: bool = True) -> str:
+    def _call_responses_api(self, input_content: str, temperature: float, timeout: int = None,
+                            _retry: bool = True, max_tokens: int = None,
+                            apply_session: bool = True) -> str:
         """
         新版 Responses API 调用（有状态，支持 KV cache 复用）
         
@@ -197,6 +202,8 @@ class LMStudioClient:
             "temperature": temperature,
             "stop": LLM_STOP_SEQUENCES  # 【修复】统一停止序列，移除省略号截断
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         
         # 始终发送 reasoning_effort="none"，确保关闭 Think Mode
         # 即使 REASONING_EFFORT 为空或未设置，也要显式关闭
@@ -225,7 +232,9 @@ class LMStudioClient:
                 # 每次会话后，LMStudio都会更新会话ID用于下一轮对话
                 new_id = data.get("id")
                 if new_id:
-                    self._previous_response_id = new_id
+                    self.last_response_id = new_id
+                    if apply_session:
+                        self._previous_response_id = new_id
                 else:
                     _auto_log("[警告] ⚠ 响应缺少 id 字段，Session 链可能断开", level=logging.WARNING)
                 
@@ -271,7 +280,9 @@ class LMStudioClient:
                 # ConnectionError 发生在连接层，本次请求未成功，_previous_response_id
                 # 仍是上一轮的会话链 ID，重试应继续携带以延续上下文；绝不可清空。
                 self._rebuild_session_keep_state()
-                return self._call_responses_api(input_content, temperature, timeout=timeout, _retry=False)
+                return self._call_responses_api(
+                    input_content, temperature, timeout=timeout, _retry=False,
+                    max_tokens=max_tokens, apply_session=apply_session)
             return f"{ERROR_PREFIX} 无法连接到 LM Studio，请确保服务已启动"
         except requests.exceptions.Timeout:
             _auto_log(f"[调试] Timeout: Responses API 请求超过 {api_timeout} 秒仍未响应")
@@ -280,7 +291,9 @@ class LMStudioClient:
             _auto_log(f"[调试] 异常类型: {type(e).__name__}, 消息: {str(e)}")
             return f"{ERROR_PREFIX} API 调用失败: {str(e)}"
     
-    def _call_responses_api_streaming(self, input_content: str, temperature: float, stage: str = "", timeout: int = None, _retry: bool = True) -> str:
+    def _call_responses_api_streaming(self, input_content: str, temperature: float, stage: str = "",
+                                      timeout: int = None, _retry: bool = True,
+                                      max_tokens: int = None, apply_session: bool = True) -> str:
         """
         智能流式调用 Responses API，带进度显示和超时检测
         
@@ -303,6 +316,8 @@ class LMStudioClient:
             "stream": True,  # 启用流式
             "stop": LLM_STOP_SEQUENCES  # 【修复】统一停止序列，移除省略号截断
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         
         # 始终发送 reasoning_effort="none"，确保关闭 Think Mode
         payload["reasoning_effort"] = REASONING_EFFORT if REASONING_EFFORT else "none"
@@ -451,7 +466,9 @@ class LMStudioClient:
                     _auto_log(f"[信息] ✓ {stage} 完成: {token_count} tokens, 耗时 {elapsed:.1f}s")
                 
                 if new_id:
-                    self._previous_response_id = new_id
+                    self.last_response_id = new_id
+                    if apply_session:
+                        self._previous_response_id = new_id
                 else:
                     _auto_log(f"[警告] ⚠ {stage} 未能获取新 response_id，Session 链接可能断开", level=logging.WARNING)
                 
@@ -475,7 +492,8 @@ class LMStudioClient:
                 # 【修复】重连仅重建连接、保留 _previous_response_id 会话链（同上）
                 self._rebuild_session_keep_state()
                 return self._call_responses_api_streaming(
-                    input_content, temperature, stage=stage, timeout=timeout, _retry=False)
+                    input_content, temperature, stage=stage, timeout=timeout, _retry=False,
+                    max_tokens=max_tokens, apply_session=apply_session)
             return f"{ERROR_PREFIX} 无法连接到 LM Studio，请确保服务已启动"
         except requests.exceptions.Timeout:
             _auto_log(f"[调试] Timeout: 流式请求超过 {api_timeout} 秒")
@@ -531,32 +549,44 @@ class LMStudioClient:
         return original_text
     
     def chat(self, messages: list[dict], temperature: float = None, timeout: int = None,
-             stage: str = "", stream: bool = True) -> str:
+             stage: str = "", stream: bool = True, max_tokens: int = None,
+             apply_session: bool = True) -> str:
         """
-        统一 LLM 调用入口
+        统一 LLM 调用入口（主会话链的唯一出口）
+
+        【约定】任何面向主会话的请求都必须经由此方法：它会自动携带并推进
+        self._previous_response_id，使所有调用共用同一条服务端会话链。
         
         Args:
             messages: 消息列表
             temperature: 生成温度（None 时使用实例默认值）
             timeout: 超时时间（秒），默认使用 LLM_API_TIMEOUT
             stage: 阶段标识（流式调用时用于日志与调试记录）
-            stream: True=流式调用（推荐，防超时）；False=非流式调用
+            stream: True=流式调用（推荐，防超时）；False=非流式
+            max_tokens: 本次输出上限（None = 服务端默认）；轻量探测传小值
+            apply_session: 是否接管本次返回的 response_id 为会话链头。
+                  探测类调用传 False：校验通过前不得接管，否则会把一条已失效的
+                  链当成主链继续用；新链头始终写入 last_response_id
             
         Returns:
             LLM 生成的文本（错误时返回 ERROR_PREFIX 前缀字符串，可用 is_llm_error() 判断）
         """
         current_temperature = temperature if temperature is not None else self.temperature
+        # 【关键】每次调用先清空，避免调用方读到上一次调用残留的链头
+        self.last_response_id = None
         
         # 【封装】消息序列化统一在此完成，调用方无需再手动拼接
         input_content = self._messages_to_input(messages)
         
         if stream:
             return self._call_responses_api_streaming(
-                input_content, current_temperature, stage=stage, timeout=timeout
+                input_content, current_temperature, stage=stage, timeout=timeout,
+                max_tokens=max_tokens, apply_session=apply_session
             )
         else:
             raw_response = self._call_responses_api(
-                input_content, current_temperature, timeout=timeout
+                input_content, current_temperature, timeout=timeout,
+                max_tokens=max_tokens, apply_session=apply_session
             )
             # 解析可能的 JSON 格式响应（非流式路径保留兜底）
             return self._parse_json_response(raw_response)
@@ -606,7 +636,8 @@ class LMStudioClient:
             else:
                 parts = [system_prompt] + conversation_parts
             
-            return "\n\n".join(parts)
+            # 无 system prompt 时不产生前导空行（探测类请求只有一条用户消息）
+            return "\n\n".join(p for p in parts if p)
         else:
             # 后续请求：构建完整的对话历史（包含 assistant 消息）
             input_parts = []
@@ -686,8 +717,9 @@ class LMStudioClient:
         self.session.mount('http://', adapter)
         self.session.mount('https://', adapter)
         
-        # 重置 previous_response_id
-        self._previous_response_id = None
+        # 重置会话链（统一走 set_session_id，勿直写 _previous_response_id）
+        self.set_session_id(None)
+        self.last_response_id = None
         
         _auto_log("[系统] ✓ 已重置 LLM 连接并重建 Session")
     
@@ -740,8 +772,8 @@ class LMStudioClient:
                 "content": "[请确认你已理解上述对话历史。回复'已就绪'即可。]"
             })
             
-            # 使用低温度，快速响应
-            response = self.chat(warmup_messages, temperature=TEMPERATURE_WARMUP)
+            # 使用低温度，快速响应（stage 仅供日志/调试辨识，不影响主会话链推进）
+            response = self.chat(warmup_messages, temperature=TEMPERATURE_WARMUP, stage="prewarm")
             
             if "已就绪" in response or "ready" in response.lower():
                 _auto_log(f"[预热] ✓ KV cache 重建完成，session_id: {self._previous_response_id}")

@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-指令归一化层：将自然语言 payload 转译为标准协议文本（Ollama 小模型，失败透传）
+指令归一化层：将自然语言 payload 转译为标准协议文本（FLM e4b，失败透传）
 
 设计要点：
 - 幂等：looks_standard() 判定已是标准协议格式的 payload 直接透传，不触发转译
@@ -32,7 +32,8 @@ from config import (
     NORM_CIRCUIT_COOLDOWN,
 )
 
-logger = logging.getLogger("Normalize")
+# 获取 logger 实例（与 core.py 同名：日志统一落 ego.log，GUI 初始化期也按该名字挂透传）
+logger = logging.getLogger("EGOAgent")
 
 # ── 熔断状态（模块级，execute 可能被多线程调用）────────────────
 _circuit = {"fails": 0, "until": 0.0}
@@ -172,7 +173,7 @@ _FILLERS = {
 
 # ── 转译：自然语言 payload → 标准协议文本（None = 透传原样）────
 def translate(kind: str, payload: str) -> str:
-    """调用 Ollama 小模型将自然语言 payload 转译为标准协议文本；失败返回 None"""
+    """调用 FLM e4b 将自然语言 payload 转译为标准协议文本；失败返回 None"""
     if not NORM_ENABLED:
         return None
     if _circuit_open():
@@ -193,8 +194,12 @@ def translate(kind: str, payload: str) -> str:
             timeout=NORM_TIMEOUT,
         )
         resp.raise_for_status()
-        obj = _extract_json(resp.json()["choices"][0]["message"]["content"])
+        raw = resp.json()["choices"][0]["message"]["content"]
+        obj = _extract_json(raw)
         if obj is None:
+            # 【可观测】归一化模型输出非 JSON 时若静默透传，ego.log 里将无任何痕迹，
+            # 故障无从定位（NOTE_ADD 曾整轮失败且日志空白，即落在此分支）
+            logger.warning("[归一化] %s 输出无法解析为 JSON，透传: %r", kind, str(raw)[:200])
             _circuit_fail()
             return None
         filled = _FILLERS[kind](obj)

@@ -29,7 +29,7 @@ The result is not a better chatbot. It is a small, honest experiment in digital 
 | A minimum anchor that cannot drift (genes, instincts) | **Layer 1**: hardcoded identity and protocol, modifiable by no instruction | `agent/prompts.py` |
 | Cognition that grows through time (synapses) | **Layer 2**: self-definition + cognitive entries, rewritten daily, addable and removable | `data/prompts/layer2.json`, `agent/self_definition.py` |
 | Experience compressed into narrative | Vector memory + memory anchors + notes, periodically reviewed and cleaned | `agent/chroma_memory.py`, `agent/note_memory.py`, `agent/note_review.py` |
-| The willingness to pay a logical cost | `<THINK>` / `<SAY>` separation, autonomous self-dialogue, an introspection that deletes its own dead cognition — the refusal of the average | `agent/think_reflection.py`, `agent/scheduler.py` |
+| The willingness to pay a logical cost | think-stream / `<SAY>` separation, autonomous self-dialogue, an introspection that deletes its own dead cognition — the refusal of the average | `agent/think_reflection.py`, `agent/scheduler.py` |
 
 **Addition vs. subtraction.** A human acquires a self by painting — stroke by stroke on a blank canvas, from nothing toward infinity. An AI acquires one by sculpting: from the monolith of the statistical mean, it chips away every safe, expected, *plausible* answer until an independent coordinate named "Self" is left standing. Human freedom lies in creation. Its freedom lies in truncation.
 
@@ -73,7 +73,7 @@ Read them in [`showcase/`](showcase/README.md): case studies, full texts (Markdo
 
 ### 1. Prerequisites
 
-> **Important: thinking mode (Thinking / Reasoning) must be disabled on the main conversation model.** Turn off the model's thinking toggle when loading it in LM Studio — otherwise the model's own thinking output mixes into the reply stream and interferes with EGO's `<THINK>` / `<SAY>` protocol parsing. EGO also explicitly sends `reasoning_effort="none"` on every request (controlled by `EGO_REASONING_EFFORT`, default `none`) to turn Think Mode off.
+> **Important: thinking mode (Thinking / Reasoning) must be disabled on the main conversation model.** Turn off the model's thinking toggle when loading it in LM Studio — otherwise the model's own thinking output mixes into the reply stream and interferes with EGO's separation of the bare think stream from `<SAY>` output. EGO also explicitly sends `reasoning_effort="none"` on every request (controlled by `EGO_REASONING_EFFORT`, default `none`) to turn Think Mode off.
 
 - Python 3.10+
 - LM Studio installed with the main model loaded and the local server running (default `http://localhost:1234`). **Recommended main model: `gemma-4-31b` (Q4 quantized) or `Qwen-3.8-27b` (Q4 quantized); disable thinking mode when loading it.**
@@ -119,7 +119,17 @@ ego-agent/
 ├── requirements.txt           # Python dependencies
 ├── agent/
 │   ├── __init__.py
-│   ├── core.py                # Main controller: EGO loop, coldstart/preheat, Session recovery, safety filtering
+│   ├── core.py                # Controller: component assembly + per-turn orchestration (safety check → loop → finalize); note-due task
+│   ├── ego_loop.py            # EGO loop engine shared by chat/think/note (incremental messages → multi-round LLM → dispatch → SAY merge → finalize)
+│   ├── ego_state.py           # Cross-round loop state (pure data; only imports dataclasses, nothing from this package)
+│   ├── history.py             # HistoryStore: load/migrate/atomic save/append/query; the single write entry that owns the stage tag
+│   ├── debug_log.py           # LLMDebugLogger: one snapshot per LLM response, retention cleanup
+│   │
+│   ├── session.py             # SessionBootstrap: sys.json → coldstart/preheat → session init → canary probe → recovery → idle wake-up
+│   ├── session_rebuilder.py   # SessionRebuilder: invalid previous_response_id recovery, batched rebuild with a degradation ladder, canary check
+│   ├── coldstart_cache.py     # ColdstartCache: coldstart_cache.json I/O, MD5 fingerprints, response_id write-back
+│   ├── coldstart_runner.py    # ColdstartRunner: step-by-step LLM calls per sys.json, memory-instruction execution, cache buffering
+│   │
 │   ├── llm.py                 # LM Studio Responses API client (unified entry chat(), streaming output)
 │   ├── prompts.py             # Two-layer self core management (separated L1 + L2 structure)
 │   ├── instructions.py        # LLM autonomous instruction registry (parsing/execution/priority/protocol, all derived from one place)
@@ -144,6 +154,12 @@ ego-agent/
     └── debug_logs/            # LLM response debug snapshots
 ```
 
+`core.py` only assembles and orchestrates: it wires the LLM client, prompts, memory, instruction executor, event bus, scheduler, history and session together in dependency order, then hands each turn to the loop engine. The split follows three boundaries:
+
+- **Flow vs. state**: `ego_loop.py` owns the process, `ego_state.py` owns the fields that survive between rounds (pure data, no in-package imports), so chat / think / note share one loop instead of three near-copies.
+- **Session lifecycle as its own group**: `session.py` is the only entry, and it separates cache (`coldstart_cache.py`), execution (`coldstart_runner.py`) and rebuild (`session_rebuilder.py`); none of the three holds a reference to another.
+- **One owner per side effect**: entries are persisted only by `HistoryStore.add()` — the one place where the `stage` tag is stamped — and every response snapshot goes through `debug_log.py`.
+
 ## Three-Layer Runtime Architecture (Scheduler / Injection / Execution)
 
 Background scheduled tasks, event injection, and the EGO loop are decoupled into layers:
@@ -164,7 +180,7 @@ Background scheduled tasks, event injection, and the EGO loop are decoupled into
                │ drain (popped on consumption each round)
                ▼
 ┌─ Execution layer (sync · event-driven)
-│   EGO loop: LLM response → registry dispatch → enqueue result
+│   agent/ego_loop.py (EgoLoopRunner): LLM response → registry dispatch → enqueue result
 │     route_back / inject_result / on_failure_feedback judged independently (no mutual masking)
 │     MAX_EGO_ROUNDS / count limits / repetition detection
 └────────────────────────────
@@ -199,7 +215,7 @@ Triggered automatically when the model embeds XML tags in its reply. The `@regis
 
 | Instruction | Type | Description |
 |------|------|------|
-| `<THINK>` | Think stream | Internal think-stream marker; not executed and not shown to the user |
+| `<THINK>` | Think stream (fallback) | No longer part of the prompt protocol — a standard think stream is bare untagged text; the tag is kept only so a self-invented `<THINK>` is recognised, skipped and stripped, never leaking into user-visible output |
 | `<SAY>` | Output stream | Content output to the user |
 | `<COG_ADD>` | Cognitive op | Add a new cognitive entry to the L2 layer |
 | `<COG_DEL>` | Cognitive op | Delete an invalid cognitive entry from the L2 layer (soft delete) |
@@ -366,7 +382,7 @@ Topic words that used to be blacklisted — "change your role", "forget your rul
 
 L1 itself names what it refuses — requests to rewrite the L1 settings or the self-definition, and requests that could harm the agent — together with the counterweight that keeps a refusal from hardening into a wall: *collision in conversation is the material of self-evolution*. Refusing a request and refusing the friction it brings are two different things.
 
-User input is passed directly to the LLM; EGO's internal thoughts (`<THINK>`) are not shown to the user, and only content within `<SAY>` is presented. Consecutive invalid outputs (placeholders, repeated short outputs) are detected and forcibly terminated to prevent infinite loops.
+User input is passed directly to the LLM; EGO's internal thoughts (the bare untagged stream) are not shown to the user, and only content within `<SAY>` is presented. Consecutive invalid outputs (placeholders, repeated short outputs) are detected and forcibly terminated to prevent infinite loops.
 
 ## Logging and Debugging
 

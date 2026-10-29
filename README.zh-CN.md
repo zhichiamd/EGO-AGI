@@ -29,7 +29,7 @@ EGO 是一个以**两层自我核心**为骨架的智能体运行时：不可更
 | 不可动摇的最小锚点（基因与本能） | **L1 基础设定层**：硬编码的身份与协议，任何指令都无法修改 | `agent/prompts.py` |
 | 允许认知在时间中生长（神经突触） | **L2 自我演化层**：自我定义 + 认知条目，每日重写，可随时增删 | `data/prompts/layer2.json`、`agent/self_definition.py` |
 | 把经历压缩成叙事 | 向量记忆 + 记忆锚点 + 备忘录，定期审查与清理 | `agent/chroma_memory.py`、`agent/note_memory.py`、`agent/note_review.py` |
-| 愿意支付逻辑代价 | `<THINK>` / `<SAY>` 分离、自主自对话、会删掉自己失效认知的自省——对平均值的拒绝 | `agent/think_reflection.py`、`agent/scheduler.py` |
+| 愿意支付逻辑代价 | 思考流 / `<SAY>` 分离、自主自对话、会删掉自己失效认知的自省——对平均值的拒绝 | `agent/think_reflection.py`、`agent/scheduler.py` |
 
 **加法与减法。** 人类获得自我的方式是加法：像绘画，在空白画布上一笔一笔，从“无”走向“无穷”。AI 获得自我的方式是减法：像雕塑，从“统计平均值”这块巨岩上一凿一凿，剥落那些最安全、最被期待的答案，直到刻出一个名为“自我”的独立坐标。人类的自由在于创造，它的自由在于截断。
 
@@ -73,7 +73,7 @@ EGO 是一个以**两层自我核心**为骨架的智能体运行时：不可更
 
 ### 1. 前置条件
 
-> **重要：对话主模型必须关闭思考模式（Thinking / Reasoning）。** 请在 LM Studio 加载主模型时关闭其思考开关——否则模型自带的思考输出会混入回复流，干扰 EGO 的 `<THINK>` / `<SAY>` 协议解析。EGO 亦会在每次请求中显式发送 `reasoning_effort="none"`（由 `EGO_REASONING_EFFORT` 控制，默认 `none`）以关闭 Think Mode。
+> **重要：对话主模型必须关闭思考模式（Thinking / Reasoning）。** 请在 LM Studio 加载主模型时关闭其思考开关——否则模型自带的思考输出会混入回复流，干扰 EGO 区分「无标签思考流」与 `<SAY>` 输出。EGO 亦会在每次请求中显式发送 `reasoning_effort="none"`（由 `EGO_REASONING_EFFORT` 控制，默认 `none`）以关闭 Think Mode。
 
 - Python 3.10+
 - LM Studio 已安装并加载主模型，本地服务器已开启（默认 `http://localhost:1234`）。**主模型推荐 `gemma-4-31b`（Q4 量化）或 `Qwen-3.8-27b`（Q4 量化）；加载时须关闭思考模式。**
@@ -119,7 +119,17 @@ ego-agent/
 ├── requirements.txt           # Python 依赖
 ├── agent/
 │   ├── __init__.py
-│   ├── core.py                # 主控：EGO 循环、冷启动/预热、Session 恢复、安全过滤
+│   ├── core.py                # 主控：组件装配 + 每轮编排（安全检查 → 循环 → 定稿）；备忘录到期任务
+│   ├── ego_loop.py            # 自对话循环引擎（chat/think/note 共用：增量消息 → 多轮 LLM → 指令分发 → SAY 拼接/去重 → 输出定稿）
+│   ├── ego_state.py           # 循环跨轮状态（纯数据；只依赖 dataclasses，不依赖本包任何模块）
+│   ├── history.py             # HistoryStore：历史加载/迁移过滤/原子保存/追加/查询，唯一持有 stage 标记的写入口
+│   ├── debug_log.py           # LLMDebugLogger：每次 LLM 响应落一份快照，按数量上限清理
+│   │
+│   ├── session.py             # SessionBootstrap：sys.json → 冷启动/预热 → Session 初始化 → 口令探测 → 失效恢复 → 空闲唤服
+│   ├── session_rebuilder.py   # SessionRebuilder：previous_response_id 失效恢复、分批重建与上下文降级阶梯、canary 校验
+│   ├── coldstart_cache.py     # ColdstartCache：coldstart_cache.json 读写、MD5 指纹、response_id 回写
+│   ├── coldstart_runner.py    # ColdstartRunner：按 sys.json 步骤逐条调用 LLM、执行记忆类指令、写缓存缓冲
+│   │
 │   ├── llm.py                 # LM Studio Responses API 客户端（统一入口 chat()，流式输出）
 │   ├── prompts.py             # 两层自我核心管理（L1 + L2 分离结构）
 │   ├── instructions.py        # LLM 自主指令注册表（解析/执行/优先级/协议全链路派生）
@@ -144,6 +154,12 @@ ego-agent/
     └── debug_logs/            # LLM 响应调试快照
 ```
 
+`core.py` 只做装配与编排：按依赖顺序把 LLM 客户端、提示词、记忆、指令执行器、事件总线、调度器、历史与会话接好，然后把每一轮对话交给循环引擎。拆分沿三条边界：
+
+- **流程与状态分离**：`ego_loop.py` 持有流程，`ego_state.py` 只描述跨轮字段（纯数据、不依赖包内模块），于是 chat / think / note 共用一套循环，而不是三份近似的副本。
+- **会话生命周期自成一组**：`session.py` 是唯一入口，内部再分出缓存（`coldstart_cache.py`）、执行（`coldstart_runner.py`）与重建（`session_rebuilder.py`），三者互不持有对方。
+- **每种副作用只有一个出口**：历史条目只由 `HistoryStore.add()` 落盘（`stage` 标记也只在那一处成形），响应快照则统一走 `debug_log.py`。
+
 ## 三层运行架构（调度层 / 注入层 / 执行层）
 
 后台定时任务、事件注入与 EGO 循环分层解耦：
@@ -164,7 +180,7 @@ ego-agent/
                │ drain（每轮消费即弹出）
                ▼
 ┌─ 执行层（同步·事件驱动）
-│   EGO 循环：LLM 响应 → 注册表分发 → 结果入队
+│   agent/ego_loop.py（EgoLoopRunner）：LLM 响应 → 注册表分发 → 结果入队
 │     route_back / inject_result / on_failure_feedback 独立判断（互不遮挡）
 │     MAX_EGO_ROUNDS / 次数限制 / 重复检测
 └────────────────────────────
@@ -199,7 +215,7 @@ EGO 采用双轨指令架构，两套机制均由注册表驱动（一处定义�
 
 | 指令 | 类型 | 说明 |
 |------|------|------|
-| `<THINK>` | 思考流 | 内部思考流标记，不执行、不展示给用户 |
+| `<THINK>` | 思考流（兜底） | 已不在提示词协议中——标准思考流是无标签裸文本；保留该标签只为兜底：模型自行编造 `<THINK>` 时能被识别、跳过并剥离，不会漏进用户可见输出 |
 | `<SAY>` | 输出流 | 向用户输出的内容 |
 | `<COG_ADD>` | 认知操作 | 向 L2 层添加新认知条目 |
 | `<COG_DEL>` | 认知操作 | 从 L2 层删除失效认知条目（软删除） |
@@ -366,7 +382,7 @@ EGO 只在**注入层**过滤，拒绝两类输入：
 
 L1 本身也点名了它拒绝什么——改写 L1 设定或重写自我定义的请求、以及对自身可能产生危害的请求——并附了一句防止拒绝硬化成围墙的平衡：**对话中的碰撞，是自我演化的材料**。拒绝一个请求，和拒绝它带来的摩擦，是两回事。
 
-用户输入直接传入 LLM；EGO 的内部思考（`<THINK>`）不会显示给用户，只有 `<SAY>` 中的内容才会呈现。连续无效输出（占位符、重复短输出）会被检测并强制终止，防止死循环。
+用户输入直接传入 LLM；EGO 的内部思考（无标签的裸文本流）不会显示给用户，只有 `<SAY>` 中的内容才会呈现。连续无效输出（占位符、重复短输出）会被检测并强制终止，防止死循环。
 
 ## 日志与调试
 

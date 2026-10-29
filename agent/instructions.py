@@ -8,8 +8,9 @@
 解析正则、纠错循环、执行优先级、系统提示词协议均由注册表派生。
 新增指令只需写一个注册函数，无需修改任何其它位置。
 
-内置指令：
-- THINK：思考流标记（不执行）
+内置指令（THINK 已从提示词协议中取消：标准思考流是无标签裸文本。保留其注册仅为兜底——
+LLM 自行编造 <THINK> 标签时能被识别、跳过并剥离，防止残标签流到用户可见输出）：
+- THINK：兜底保留，防止LLM自行编造思考流标记（不执行）
 - CONTINUE：继续自我对话
 - SAY：输出内容给用户
 - COG_ADD：向第二层自我核心添加认知
@@ -120,6 +121,8 @@ class InstructionResult:
 # ── 指令注册表（单一事实源）──────────────────────────────────────
 # 全部指令标签在此声明；解析正则、纠错循环、执行优先级、协议注入全部由此派生。
 # 新增指令：用 @register_instruction 装饰执行函数即可，其它位置零改动。
+# 注：THINK 已不在提示词协议中（标准思考流是无标签裸文本），保留它仅为兜底 LLM 自行
+# 编造 <THINK> 标签的情况——识别后跳过并剥离，避免残标签出现在用户可见输出里。
 INSTRUCTION_TAGS = ("THINK", "SAY", "TOOL", "CONTINUE", "MEMO_RD", "COG_ADD", "COG_DEL",
                     "NOTE_ADD", "NOTE_RD", "NOTE_DEL", "WEB_SRCH")
 
@@ -168,6 +171,16 @@ def get_instruction(tag: str):
 def all_instructions() -> list:
     """返回全部指令规格（按注册顺序）"""
     return list(_REGISTRY.values())
+
+
+def is_executable(tag: str) -> bool:
+    """指令是否需真正执行（未注册 / 标记型指令一律不执行）
+
+    原多处硬编码 "kind not in (SAY, THINK, CONTINUE)" 特判的注册表等价物。
+    主循环与冷启动/预热循环共用，避免各自维护同义判断。
+    """
+    spec = get_instruction(tag)
+    return bool(spec and spec.executable)
 
 
 # 【新格式】匹配 <TAG> 内容 </TAG> 的 XML 风格指令
@@ -503,7 +516,7 @@ def is_blank_text(text: str) -> bool:
     """文本是否"实质为空"：纯空白或仅含不可见字符（零宽空格/零宽关联符/BOM 等）视为空。
 
     与 is_invalid_content 的"过短/占位符"判定不同，is_blank_text 只回答"是否存在可见字符"。
-    供指令空载荷过滤（filter_empty_payload）与输出清洗（_sanitize_output/_handle_say_result）统一判空。
+    供指令空载荷过滤（filter_empty_payload）与 SAY 内容判空（_handle_say_result）统一使用。
     """
     return not (text and _INVISIBLE_CHARS_RE.sub("", text))
 
@@ -602,6 +615,8 @@ class InstructionExecutor:
 
     # ── 自我控制指令 ────────────────────────────────────────────
 
+    # 【兜底保留】THINK 已从提示词协议取消（思考流=无标签裸文本），此注册只为兜底 LLM
+    # 自行编造的 <THINK>...</THINK>：识别后跳过执行并把标签剥掉，不让残标签流到可见输出。
     @register_instruction("THINK", description="思考流标记（不执行）",
                           skip_execute=True, priority=5)
     def _cmd_think(self, instr: ParsedInstruction) -> InstructionResult:
@@ -785,7 +800,7 @@ class InstructionExecutor:
     # 【失败自愈】on_failure_feedback 将人话失败原因（未配 Key / 超时 / 配额）回注下一轮。
     # 【不归一化】payload 本身就是自然语言检索词，无需经 FLM 转译（normalize 留空）。
     # 【阶段门控】allowed_stages=("chat", "think", "note")：检索结果须回注下一轮方能被消费。
-    # chat/think/note 均走 _run_ego_loop 事件通道回注；冷启动/预热为直 execute() 后丢弃
+    # chat/think/note 均走 EgoLoopRunner.run 事件通道回注；冷启动/预热为直 execute() 后丢弃
     # 结果，故这些阶段由 execute() 统一静默跳过（不做无谓网络请求/配额消耗，也不产生告警噪音）。
     @register_instruction("WEB_SRCH", description="联网检索（Tavily）",
                           executable=True, route_back=True, inject_result=True,
