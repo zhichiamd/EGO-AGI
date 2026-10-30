@@ -268,6 +268,47 @@ def _restore_placeholders(text: str, placeholder_map: dict) -> str:
     return text
 
 
+def _mask_bare_reference_open_tags(text: str, placeholder_map: dict) -> str:
+    """屏蔽正文里裸写的引用态开标签（未被引号/反引号包裹的 `<TAG>` 引用）。
+
+    LLM 常在思考流里裸写指令标签作说明（如“保持格式刚性，同时在 <SAY> 中输出温情”），
+    该开标签没有自己的闭合标签；阶段2 的宽松匹配会把它认作指令起点，抢走后一个真实
+    指令的闭合标签，导致真实指令与它区间重叠而被阶段3 丢弃，载荷退化为
+    “中输出温情。<SAY> 真正的回复……”（GUI 即显示这段脏文本）。
+
+    判定（逐标签栈匹配）：同标签开标签多于闭合标签时，未被任何闭合标签匹配、且其后
+    仍存在同标签闭合标签的开标签，只能是被正文引用的示例 → 替换为占位符。
+    “忘记写闭合标签”的情形其后没有任何闭合标签，仍交由宽松匹配兜底，行为不变。
+
+    占位符写入调用方的 placeholder_map，由 _restore_placeholders 统一恢复
+    （引用态标签应原样留在纯文本中，不该被剥离）。
+    """
+    counter = len(placeholder_map)
+    for tag_name in list(_REGISTRY):
+        open_tag = f"<{tag_name}>"
+        close_tag = f"</{tag_name}>"
+        opens = [m.start() for m in re.finditer(re.escape(open_tag), text)]
+        closes = [m.start() for m in re.finditer(re.escape(close_tag), text)]
+        if not opens or not closes or len(opens) <= len(closes):
+            continue
+
+        # 栈匹配：每个闭合标签占用其前方最近的开标签，剩余者即未闭合的开标签
+        unmatched = list(opens)
+        for cp in closes:
+            candidates = [op for op in unmatched if op < cp]
+            if candidates:
+                unmatched.remove(candidates[-1])
+
+        # 只屏蔽“后方仍有闭合标签”的未匹配开标签（真正的裸写引用）
+        to_mask = [pos for pos in unmatched if any(cp > pos for cp in closes)]
+        for pos in sorted(to_mask, reverse=True):
+            placeholder = f"__QUOTED_{counter}__"
+            counter += 1
+            placeholder_map[placeholder] = open_tag
+            text = text[:pos] + placeholder + text[pos + len(open_tag):]
+    return text
+
+
 def _is_placeholder_payload(payload: str) -> bool:
     """判断指令载荷是否为"格式示例占位符"（如 <TAG> ... </TAG> 中的 '...'）。
 
@@ -297,6 +338,11 @@ def parse_instructions(text: str) -> list[ParsedInstruction]:
     # ===== 阶段1：保护被引号/反引号包裹的指令标记 =====
     temp_text, placeholder_map = _protect_quoted_tags(text, tag_names)
     
+    # ===== 阶段1.2：屏蔽正文裸写的引用态开标签 =====
+    # 须在纠错之前：否则有多个裸写引用（如 3 个开标签 + 1 个闭合标签）时，
+    # 阶段1.5 会把“多余开标签”误判为“用开标签代替闭合标签”而改成 </TAG>，造出伪指令
+    temp_text = _mask_bare_reference_open_tags(temp_text, placeholder_map)
+
     # ===== 阶段1.5：自动纠正常见的标签错误 =====
     # 修复 LLM 常见的错误：
     # 1. 用 <TAG> 代替 </TAG> 作为闭合标签（如 <SAY> 内容 <SAY> → <SAY> 内容 </SAY>）
@@ -541,8 +587,11 @@ def strip_instructions(text: str) -> str:
     避免剥离用户可见内容里对指令标签的引用/示例（如 SAY 输出里的 `<THINK>...</THINK>`）。
     """
     text = _normalize_tag_case(text)
-    # 保护引用态标签（反引号/引号包裹）→ 剥离真实指令 → 恢复引用
+    # 保护引用态标签（反引号/引号包裹）→ 屏蔽裸写引用开标签 → 剥离真实指令 → 恢复引用
     protected, placeholder_map = _protect_quoted_tags(text, _tag_names())
+    # 裸写引用态开标签同样需屏蔽：否则正则会把 `<SAY>` 到真实 `</SAY>` 的整段
+    # 当成一条指令剥掉，连思考正文一起吞没（与 parse_instructions 行为对齐）
+    protected = _mask_bare_reference_open_tags(protected, placeholder_map)
     instr_re = re.compile(rf"<({_tag_names()})>\s*([\s\S]*?)\s*</\1>")
     protected = instr_re.sub("", protected)
     return _restore_placeholders(protected, placeholder_map).strip()
