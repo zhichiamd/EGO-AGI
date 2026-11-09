@@ -190,7 +190,14 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         if self._auto_think_enabled or self._auto_reflection_enabled or self._self_def_enabled or self._note_review_enabled:
             _auto_log("[信息] 后台定时任务已由统一调度器接管")
         else:
-            _auto_log("[信息] 全部后台定时任务未启用")            
+            _auto_log("[信息] 全部后台定时任务未启用")
+
+        # 【上下文监控】初始化线程内预热一次分母缓存：GUI 状态栏启动即有总量，
+        # 避免首轮对话结束后才发现「上限未知」；失败静默降级，不阻塞启动
+        try:
+            self.llm.refresh_context_limit()
+        except Exception:
+            pass
 
 
     # ── 命令统一入口（CLI 与 GUI 共用）──────────────────────
@@ -481,6 +488,8 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
         finally:
             # 主对话处理完毕即视为一次服务端活动，刷新空闲时间（防止连续对话误判空闲）
             self.session.touch_activity()
+            # 【上下文监控】异常路径兜底汇总（正常路径已在 ego_loop.run 出口 flush，幂等）
+            self.llm.flush_usage()
             self._agent_lock.release()
 
     def _process_input_inner(self, user_input: str, images: list = None) -> str:
@@ -628,8 +637,73 @@ class EGOAgent(ThinkReflectionMixin, SelfDefinitionMixin, NoteReviewMixin):
             f"模型: {self.llm.model}\n"
             f"API: {self.llm.api_base}\n"
             f"对话历史: {history_count} 条\n"
+            f"\n{self.format_context_detail()}\n"
             f"\n── 第二层自我核心 ──\n{layer2}"
         )
+
+    # ── 上下文占用（显示层统一入口，只读内存字段、不发请求）──────────
+
+    def get_context_info(self) -> dict:
+        """上下文占用快照（GUI 状态栏 / CLI / 命令共用；只读内存字段，不发请求）"""
+        try:
+            return self.llm.get_context_info()
+        except Exception:
+            return {}
+
+    def format_context_line(self) -> str:
+        """单行上下文占用摘要（CLI 每轮回复后打印）
+
+        未采集到数据（首次调用前）或监控关闭时返回空串，调用方据此跳过打印。
+        """
+        info = self.get_context_info()
+        if not info or not info.get("enabled", True) or not info.get("input_tokens"):
+            return ""
+        used = info["input_tokens"]
+        limit = info.get("limit")
+        ratio = info.get("ratio")
+        if limit and ratio is not None:
+            line = f"[上下文] {ratio * 100:.1f}% 已用 {used}/{limit}，余 {limit - used}"
+        else:
+            line = f"[上下文] 已用 {used} tokens（上限未知）"
+        if info.get("delta_chain") is not None:
+            line += f" | 链内 {info['delta_chain']:+d}"
+        if info.get("delta_prev") is not None:
+            line += f" | 环比 {info['delta_prev']:+d}"
+        return line
+
+    def format_context_detail(self) -> str:
+        """多行上下文占用详情（/status 与 /context 共用）"""
+        info = self.get_context_info()
+        if not info:
+            return "── 上下文占用 ──\n尚未采集（等待首次 LLM 调用）"
+        if not info.get("enabled", True):
+            return "── 上下文占用 ──\n监控已关闭（EGO_CONTEXT_MONITOR_ENABLED=false）"
+
+        used = info.get("input_tokens") or 0
+        peak = info.get("peak_input") or 0
+        limit = info.get("limit")
+        ratio = info.get("ratio")
+        if limit and ratio is not None:
+            head = f"当前 {used} tokens ({ratio * 100:.1f}% / {limit})"
+            sub = f"峰值 {peak} | 剩余 {limit - peak}"
+        else:
+            head = f"当前 {used} tokens（上限未知）"
+            sub = f"峰值 {peak}"
+        sub += f" | 缓存命中 {info.get('cached') or 0}"
+        sub += f" | 最近阶段 {info.get('stage') or '-'} | 调用 {info.get('calls') or 0} 次"
+
+        delta = []
+        if info.get("delta_chain") is not None:
+            delta.append(f"链内累计 {info['delta_chain']:+d}")
+        if info.get("delta_prev") is not None:
+            delta.append(f"环比 {info['delta_prev']:+d}")
+        if info.get("new_chain"):
+            delta.append("本轮发生过换链（基线已重置）")
+
+        lines = ["── 上下文占用 ──", head, sub]
+        if delta:
+            lines.append(" | ".join(delta))
+        return "\n".join(lines)
     
     
     def _add_to_history_with_stage(self, role: str, content: str, stage: str = None):

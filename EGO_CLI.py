@@ -7,6 +7,7 @@ EGO 智能体 ── 具备两层自我核心的自主智能体
 
 命令:
   /status   - 查看 EGO 当前状态（自我核心、记忆锚点等）
+  /context  - 查看上下文空间占用（已用/上限/峰值/环比）
   /clear    - 清空对话历史
   /think    - 手动触发一次自对话任务
   /reflect  - 手动触发一次自省任务
@@ -56,6 +57,7 @@ import logging.handlers
 from config import (
     LOG_DIR, LOG_LEVEL, LOG_TO_CONSOLE, LOG_FORMAT, LOG_DATE_FORMAT,
     SESSION_INIT_HISTORY_COUNT,  # 重启回显历史条数（与回注 LLM 保持一致）
+    CONTEXT_CLI_ECHO,            # 每轮回复后是否打印上下文占用简讯
 )
 from agent.core import EGOAgent
 from agent.tools import dispatch_line  # 手动命令注册表分发入口
@@ -184,6 +186,11 @@ def main():
         try:
             # 【修复】回复改由 agent.on_chat_output 回调即时打印（就绪即显示，先于自对话阶段）
             agent.process_input(user_input)
+            # 【上下文】每轮回复后打印一行占用简讯（EGO_CONTEXT_CLI_ECHO=false 可关闭）
+            if CONTEXT_CLI_ECHO:
+                ctx_line = agent.format_context_line()
+                if ctx_line:
+                    print(ctx_line)
         except Exception as e:
             print(f"\n[错误] 处理失败: {e}")
     

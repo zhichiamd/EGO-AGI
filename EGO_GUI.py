@@ -15,6 +15,7 @@ EGO 图形界面（GUI）—— 独立入口，不改动 CLI（ego.py）
 import os
 import re
 import sys
+import time
 import base64
 import queue
 import logging
@@ -51,6 +52,7 @@ from config import (
     SESSION_INIT_HISTORY_COUNT,     # 重启恢复历史条数（与回注 LLM 保持一致）
     GUI_MIN_WIDTH,                  # GUI 窗口最小宽度
     GUI_MIN_HEIGHT,                 # GUI 窗口最小高度
+    CONTEXT_STATUS_REFRESH,         # 状态栏上下文占用刷新节流（秒）
 )
 
 
@@ -319,6 +321,7 @@ class EGOApp:
         # _chat_busy 只挡新聊天，_cmd_busy 只挡并发命令
         self._chat_busy = False
         self._cmd_busy = False
+        self._ctx_refresh_ts = 0.0   # 上下文占用的上一次次刷新时间（节流用）
 
         root.title("🚣🏻EGO (自演化智能体)")
         root.geometry("920x700")
@@ -337,8 +340,16 @@ class EGOApp:
         self._build_menu()
 
         self.status_var = tk.StringVar(value="正在初始化 EGO，请稍候 ...")
-        tk.Label(self.root, textvariable=self.status_var, anchor="w",
-                 relief="sunken").pack(side=tk.BOTTOM, fill=tk.X)
+        # 状态栏：左侧进度/提示（可变宽），右侧常驻上下文占用（固定宽度、分级配色）
+        status_bar = tk.Frame(self.root)
+        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        tk.Label(status_bar, textvariable=self.status_var, anchor="w",
+                 relief="sunken").pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.ctx_var = tk.StringVar(value="")
+        self.ctx_label = tk.Label(status_bar, textvariable=self.ctx_var, anchor="e",
+                                  relief="sunken", fg="#5a5a5a",
+                                  font=("Microsoft YaHei UI", 9))
+        self.ctx_label.pack(side=tk.RIGHT)
 
         input_frame = tk.Frame(self.root)
         input_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=6, pady=6)
@@ -551,7 +562,49 @@ class EGOApp:
                     return
         except queue.Empty:
             pass
+
+        # 上下文占用：节流刷新（只读 Agent 内存字段，不发请求；后台 Think/备忘录也会反映进来）
+        now = time.time()
+        if now - self._ctx_refresh_ts >= CONTEXT_STATUS_REFRESH:
+            self._ctx_refresh_ts = now
+            self._refresh_context_status()
         self.root.after(120, self._poll)
+
+    # ── 上下文占用显示 ────────────────────────────────────
+    # 分级配色：ok=常态灰，warn=橙（接近上限），crit=红（建议重建会话链）
+    _CTX_LEVEL_COLORS = {"ok": "#5a5a5a", "warn": "#c07000", "crit": "#c00000"}
+
+    def _refresh_context_status(self):
+        """刷新状态栏右侧的上下文占用（无数据时留空，不显示占位符）"""
+        agent = self.agent
+        if not agent or not hasattr(agent, "get_context_info"):
+            return
+        info = agent.get_context_info()
+        if not info or not info.get("enabled", True) or not info.get("input_tokens"):
+            if self.ctx_var.get():
+                self.ctx_var.set("")
+            return
+        used = info["input_tokens"]
+        limit = info.get("limit")
+        ratio = info.get("ratio")
+        if limit and ratio is not None:
+            text = f"上下文 {ratio * 100:.1f}%  {self._fmt_k(used)}/{self._fmt_k(limit)}"
+        else:
+            text = f"上下文 {self._fmt_k(used)} tokens"
+        level = info.get("level") or "ok"
+        if level in ("warn", "crit"):
+            text = "⚠ " + text
+        self.ctx_var.set(text)
+        self.ctx_label.configure(fg=self._CTX_LEVEL_COLORS.get(level, "#5a5a5a"))
+
+    @staticmethod
+    def _fmt_k(n) -> str:
+        """token 数缩写（状态栏宽度有限）：14210 → 14.2k"""
+        if n >= 100000:
+            return f"{n / 1000:.0f}k"
+        if n >= 10000:
+            return f"{n / 1000:.1f}k"
+        return str(int(n))
 
     # ── 图片选择与编码 ─────────────────────────────────────────
     def _pick_images(self):

@@ -254,6 +254,9 @@ class EgoLoopRunner:
                 # note 路径判失败（保留未触发，下轮重试），Think 路径静默跳过。
                 # 思考流只作为循环上下文（ego_log），绝不充当用户回复。
                 break
+        # 【新增】上下文占用汇总落盘：本阶段（chat/think/note）多轮调用的 usage 在轮内
+        # 只累积，此处统一汇总成一行；run() 是唯一出口（5 处 break / 1 处 return 均经过）
+        self.llm.flush_usage()
         # 【新增】循环结束清理循环内事件（防止泄漏到下次对话）；NOTE_DUE 等持久事件保留
         self.events.cleanup()
 

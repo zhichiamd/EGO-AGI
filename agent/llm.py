@@ -24,7 +24,12 @@ from config import (
     LLM_STOP_SEQUENCES,
     HTTP_POOL_CONNECTIONS,  # 连接池大小
     HTTP_POOL_MAXSIZE,      # 最大连接数
-    TEMPERATURE_WARMUP      # Session 预热低温度
+    TEMPERATURE_WARMUP,     # Session 预热低温度
+    CONTEXT_MONITOR_ENABLED,  # 上下文占用监控开关
+    CONTEXT_WARN_RATIO,       # 上下文告警阈值（接近上限）
+    CONTEXT_CRIT_RATIO,       # 上下文告警阈值（建议重建）
+    CONTEXT_INFO_CACHE_TTL,   # 上下文容量缓存 TTL
+    CONTEXT_INFO_TIMEOUT,     # 上下文容量探测超时
 )
 
 # 获取 logger 实例
@@ -137,6 +142,30 @@ class LMStudioClient:
         # 【新增】最近一次调用返回的 response_id（无论是否被接管为会话链头）。
         # 探测类调用传 apply_session=False 时用它读取新链头，而不改动主链
         self.last_response_id: Optional[str] = None
+
+        # ── 上下文占用采集（只读统计，不参与请求构造）──────────────────
+        # 数据来源：流式 response.completed 里的 usage（input_tokens 是「同一条链上的
+        # 累计值」，直接用即可得到当前上下文占用，不需额外请求）
+        self.last_usage: Optional[dict] = None
+        # 最近一次落盘的汇总（GUI 状态栏 / CLI / /context 只读这里，不在显示线程发请求）
+        self.last_context_info: dict = {}
+        # 尚未落盘时的实时快照：多轮阶段（EGO-Round-N）要到循环出口才汇总，
+        # 期间若只读 last_context_info，状态栏会一直停在一轮之前的旧值
+        self._live_info: dict = {}
+        self._usage_seq = 0
+        # 聚合桶：一次「阶段」内可能有多轮调用（EGO-Round-1/2/3…），出口一次性汇总
+        self._usage_bucket = self._new_bucket()
+        # 链锚点：本次请求发起前的 previous_response_id / 上次调用后推进出的 id
+        # （响应 id 每次都变，不能拿它当「链」标识；只能靠 parent 关系识别换链）
+        self._usage_parent_id: Optional[str] = None
+        self._usage_last_id: Optional[str] = None
+        self._usage_baseline: Optional[int] = None   # 链内累计起点
+        self._usage_prev_input: Optional[int] = None  # 上一阶段末次 input（环比基准）
+        self._usage_alert_level = "ok"               # 已告警级别（只在升级时提示）
+        # 分母缓存：成功/失败都写时间戳，避免失败时反复重试拖慢首轮对话
+        self._ctx_limit: Optional[int] = None
+        self._ctx_limit_ts = 0.0
+        self._ctx_limit_warned = False
         
         # 如果模型是 default-model，尝试从 LM Studio 获取实际模型
         _auto_log("[信息] 开始加载模型.........")
@@ -228,6 +257,10 @@ class LMStudioClient:
             try:
                 response.raise_for_status()
                 data = response.json()
+
+                # 【上下文采集】非流式：usage 在响应顶层（流式则在 response.completed 的 response 子对象里）
+                if isinstance(data.get("usage"), dict):
+                    self.last_usage = data["usage"]
                 
                 # 每次会话后，LMStudio都会更新会话ID用于下一轮对话
                 new_id = data.get("id")
@@ -395,6 +428,17 @@ class LMStudioClient:
                                         err_msg = str(err_obj)
                                     _auto_log(f"[警告] ⚠ {stage} 引擎拒绝请求: {err_msg}", level=logging.WARNING)
                                     return f"{ERROR_PREFIX} 引擎拒绝请求: {err_msg}"
+
+                                # 【上下文采集】流式终态事件：usage 嵌在 response 子对象下
+                                # （事件顶层为 null）。input_tokens 是「同一条链上的累计值」，
+                                # 取到即是当前上下文占用，无需额外请求。
+                                if data.get("type") == "response.completed":
+                                    resp_obj = data.get("response")
+                                    if isinstance(resp_obj, dict) and isinstance(resp_obj.get("usage"), dict):
+                                        self.last_usage = resp_obj["usage"]
+                                elif self.last_usage is None and isinstance(data.get("usage"), dict):
+                                    # 兼容其他后端把 usage 放在顶层的流式实现
+                                    self.last_usage = data["usage"]
 
                                 if new_id is None:
                                     # 1. 尝试从 response 对象中获取 (最常见)
@@ -574,22 +618,29 @@ class LMStudioClient:
         current_temperature = temperature if temperature is not None else self.temperature
         # 【关键】每次调用先清空，避免调用方读到上一次调用残留的链头
         self.last_response_id = None
+        # 【上下文采集】同步清空上次 usage（no-token 超时/引擎拒绝时不会误读残留值），
+        # 并记录本次请求的 parent 作为「换链」判定锚点（响应 id 每次都变，只能靠 parent 关系识别）
+        self.last_usage = None
+        self._usage_parent_id = self._previous_response_id
         
         # 【封装】消息序列化统一在此完成，调用方无需再手动拼接
         input_content = self._messages_to_input(messages)
         
         if stream:
-            return self._call_responses_api_streaming(
+            text = self._call_responses_api_streaming(
                 input_content, current_temperature, stage=stage, timeout=timeout,
                 max_tokens=max_tokens, apply_session=apply_session
             )
         else:
-            raw_response = self._call_responses_api(
+            # 解析可能的 JSON 格式响应（非流式路径保留兜底）
+            text = self._parse_json_response(self._call_responses_api(
                 input_content, current_temperature, timeout=timeout,
                 max_tokens=max_tokens, apply_session=apply_session
-            )
-            # 解析可能的 JSON 格式响应（非流式路径保留兜底）
-            return self._parse_json_response(raw_response)
+            ))
+
+        # 【上下文采集】单入口收口：无论流式/非流式、成功/失败，都在出口判定一次
+        self._record_usage(stage)
+        return text
     
     def _messages_to_input(self, messages: list[dict]):
         """
@@ -784,3 +835,270 @@ class LMStudioClient:
         except Exception as e:
             _auto_log(f"[警告] ✗ 预热失败: {e}，将在首次请求时重建上下文", level=logging.WARNING)
             return False
+
+    # ── 上下文占用采集（只读统计，不重建/不裁剪/不改请求体）────────────────
+    # 数据全来自响应自带的 usage 与 /api/v0/models 的 loaded_context_length：不发额外生成请求。
+    # 日志在调用线程落盘，显示层只读 last_context_info（不在 UI 线程发网络请求）。
+    # 探测类调用（warmup/canary）只记 usage，不参与链基线与阶段行：
+    # apply_session=False 的探测不推进主链，其 input 也不代表真实上下文。
+    _CHAIN_EXEMPT_STAGES = ("warmup", "canary")
+
+    @staticmethod
+    def _normalize_stage(stage: str) -> str:
+        """阶段归一化：剥掉 -retry/-Round-N/-Batch-N/Step N 后缀，EGO→chat，空→warmup"""
+        s = (stage or "").strip()
+        s = re.sub(r"-retry$", "", s)
+        s = re.sub(r"(-Round-\d+)+$", "", s)
+        s = re.sub(r"-Batch-\d+$", "", s)
+        s = re.sub(r"\s*Step\s*\d+$", "", s).strip()
+        if not s:
+            return "warmup"
+        return "chat" if s == "EGO" else s
+
+    @staticmethod
+    def _fmt_tokens(n) -> str:
+        """token 数缩写（日志/状态栏用）：14210 → 14.2k"""
+        if not n:
+            return "0"
+        if n >= 100000:
+            return f"{n / 1000:.0f}k"
+        if n >= 10000:
+            return f"{n / 1000:.1f}k"
+        return str(int(n))
+
+    def refresh_context_limit(self, force: bool = False) -> Optional[int]:
+        """取上下文总长度（分母）：/api/v0/models 的 loaded_context_length，带 TTL 缓存
+
+        失败只提示一次、且失败后把 TTL 放宽 4 倍再重试：服务未启动时
+        既不能拖慢首轮对话，也不能每轮刷一条告警。返回 None = 上限未知，
+        显示层降级为只报 tokens（不拿 max_context_length 充当上限，避免虚报余量）。
+        """
+        import time
+        if not CONTEXT_MONITOR_ENABLED:
+            return None
+        now = time.time()
+        if not force and now < self._ctx_limit_ts:
+            return self._ctx_limit
+
+        base = self.api_base[:-3] if self.api_base.endswith("/v1") else self.api_base
+        url = f"{base}/api/v0/models"
+        try:
+            resp = self.session.get(url, timeout=CONTEXT_INFO_TIMEOUT)
+            try:
+                resp.raise_for_status()
+                data = resp.json()
+            finally:
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+
+            items = [m for m in (data.get("data") or []) if isinstance(m, dict)]
+            # 匹配优先级：同名且 loaded → 唯一的 loaded 项 → 唯一带 loaded_context_length 的项
+            target = next((m for m in items
+                           if m.get("id") == self.model and m.get("state") == "loaded"), None)
+            if target is None:
+                loaded = [m for m in items if m.get("state") == "loaded"]
+                if len(loaded) == 1:
+                    target = loaded[0]
+            if target is None:
+                cands = [m for m in items if m.get("loaded_context_length")]
+                target = cands[0] if len(cands) == 1 else None
+
+            limit = int((target or {}).get("loaded_context_length") or 0)
+            if limit > 0:
+                if self._ctx_limit and self._ctx_limit != limit:
+                    _auto_log(f"[上下文] ⟲ 上下文容量变更: {self._ctx_limit} → {limit}")
+                self._ctx_limit = limit
+                self._ctx_limit_warned = False
+                self._ctx_limit_ts = now + CONTEXT_INFO_CACHE_TTL
+                return limit
+            self._ctx_limit = None
+            self._ctx_limit_ts = now + CONTEXT_INFO_CACHE_TTL
+            if not self._ctx_limit_warned:
+                _auto_log("[上下文] 未取到 loaded_context_length，上限未知（仅统计 tokens）")
+                self._ctx_limit_warned = True
+            return None
+        except Exception as e:
+            self._ctx_limit = None
+            self._ctx_limit_ts = now + CONTEXT_INFO_CACHE_TTL * 4
+            if not self._ctx_limit_warned:
+                _auto_log(f"[上下文] 上限获取失败: {e}；{CONTEXT_INFO_CACHE_TTL * 4}s 后重试")
+                self._ctx_limit_warned = True
+            return None
+
+    def _record_usage(self, stage: str) -> None:
+        """采集单次调用的 usage：换链判定 → 累积到阶段桶 → 按需落盘
+
+        流式路径在 response.completed 里取 usage，非流式在响应顶层取；
+        input_tokens 是「同一条链上的累计值」，取到即是当前上下文占用。
+        """
+        if not CONTEXT_MONITOR_ENABLED:
+            return
+        usage = self.last_usage
+        if not isinstance(usage, dict):
+            return
+        input_tokens = int(usage.get("input_tokens") or 0)
+        if input_tokens <= 0:
+            return
+        output_tokens = int(usage.get("output_tokens") or 0)
+        details = usage.get("input_tokens_details")
+        cached = int((details or {}).get("cached_tokens") or 0) if isinstance(details, dict) else 0
+
+        norm = self._normalize_stage(stage)
+        self._usage_seq += 1
+
+        # 1) 换链判定：parent 必须等于「上次调用推进出的 id」才算同一条链。
+        #    响应 id 每次都变，不能当「链」标识；靠 parent 关系才能识别
+        #    /clear、纯思考流回滚、会话重建、重启复用这四种链头变更
+        parent = self._usage_parent_id
+        new_chain = False
+        if norm in self._CHAIN_EXEMPT_STAGES:
+            # 探测类：不取基线、不刷显示，但**必须跟着链头走**。
+            # 空闲唤醒是链内探测（apply_session=True，会推进 previous_response_id），
+            # 口令 canary 校验通过后由调用方接管新链头；若此处不跟随，下一次真实调用
+            # 的 parent 就对不上 _usage_last_id，会误报「新链」并把基线重置掉
+            # （实测：Session-Init → warmup → 首轮对话 会凭空报一次换链）。
+            # 仅当探测确实接在已知链头上时才跟随：无链冷启动 / 失败探测不碰锚点。
+            if (self._usage_last_id is not None and parent == self._usage_last_id
+                    and self.last_response_id):
+                self._usage_last_id = self.last_response_id
+        else:
+            same_chain = self._usage_last_id is not None and parent == self._usage_last_id
+            if not same_chain:
+                # 首次建立基线（_usage_last_id 为 None）不算「换链」：
+                # 否则每次启动后的首轮对话都会提示「本轮发生过换链」
+                if self._usage_last_id is not None:
+                    new_chain = True
+                    _auto_log("[上下文] ⟲ 会话链已切换（新链），基线重置")
+                self._usage_baseline = input_tokens
+            self._usage_last_id = self.last_response_id or parent
+
+        # 2) 累积到阶段桶（阶段切换时先把上一阶段落盘，避免跨阶段数据混行）
+        #    注意：_flush_usage_row() 末尾会换上新桶，此处必须重新取引用，
+        #    否则本次调用的数据会写进已被丢弃的旧桶（阶段切换处统计静默丢失）
+        b = self._usage_bucket
+        if b["calls"] and b["stage"] != norm:
+            self._flush_usage_row()
+            b = self._usage_bucket
+        b["stage"] = norm
+        b["calls"] += 1
+        b["max_input"] = max(b["max_input"], input_tokens)
+        b["last_input"] = input_tokens
+        b["max_out"] = max(b["max_out"], output_tokens)
+        b["max_cached"] = max(b["max_cached"], cached)
+        b["last_cached"] = cached
+        b["new_chain"] = b["new_chain"] or new_chain
+
+        # 3) 实时快照：多轮阶段要到循环出口才汇总，期间状态栏靠它看到「本轮此刻」的值
+        if norm not in self._CHAIN_EXEMPT_STAGES:
+            self._live_info = self._build_info(norm, input_tokens, b["max_input"],
+                                               b["calls"], b["max_out"], b["max_cached"],
+                                               b["new_chain"])
+
+        # 4) 落盘判据：多轮阶段（*-Round-N*）只累积，由循环出口 flush_usage() 汇总；
+        #    单次调用阶段（Think step / 冷启动 / 重建 / 自省 / 探测）立即一行
+        if "-Round-" not in (stage or ""):
+            self._flush_usage_row()
+
+    @staticmethod
+    def _new_bucket() -> dict:
+        """新建空聚合桶（一个阶段内多次调用的累积容器）"""
+        return {"stage": "", "calls": 0, "max_input": 0, "last_input": 0,
+                "max_out": 0, "max_cached": 0, "last_cached": 0, "new_chain": False}
+
+    def _build_info(self, stage, last_input, peak, calls, max_out, max_cached, new_chain) -> dict:
+        """由桶内数据生成占用快照（日志行 / 状态栏 / 命令共用同一套口径）
+
+        只读 `_ctx_limit` 缓存，不在采集路径发网络请求；上限未知时 ratio 为 None，
+        显示层据此降级为「只报 tokens」，不拿 max_context_length 冒充上限。
+        """
+        limit = self._ctx_limit
+        ratio = (peak / limit) if limit else None
+        return {
+            "stage": stage,
+            "input_tokens": last_input,
+            "peak_input": peak,
+            "limit": limit,
+            "ratio": ratio,
+            "remaining": (limit - peak) if limit else None,
+            "delta_chain": (peak - self._usage_baseline) if self._usage_baseline is not None else None,
+            "delta_prev": (last_input - self._usage_prev_input) if self._usage_prev_input is not None else None,
+            "cached": max_cached,
+            "output_peak": max_out,
+            "calls": calls,
+            "new_chain": new_chain,
+            "level": ("unknown" if ratio is None else
+                      "crit" if ratio >= CONTEXT_CRIT_RATIO else
+                      "warn" if ratio >= CONTEXT_WARN_RATIO else "ok"),
+            "enabled": CONTEXT_MONITOR_ENABLED,
+        }
+
+    def _flush_usage_row(self) -> None:
+        """把累积桶汇总成一行日志，并刷新 last_context_info（显示层数据源）"""
+        b = self._usage_bucket
+        if not b["calls"]:
+            return
+        self.refresh_context_limit()   # 只为刷新 _ctx_limit（TTL 内不发请求）
+        info = self._build_info(b["stage"], b["last_input"], b["max_input"],
+                                b["calls"], b["max_out"], b["max_cached"], b["new_chain"])
+        peak, limit, ratio = info["peak_input"], info["limit"], info["ratio"]
+        exempt = b["stage"] in self._CHAIN_EXEMPT_STAGES
+
+        if ratio is None:
+            head = f"峰值 {peak} (上限未知)"
+        else:
+            head = f"峰值 {peak} ({ratio * 100:.1f}%/{limit} 余{self._fmt_tokens(limit - peak)})"
+        # 探测类的 input 不代表真实上下文，链内/环比对它没有意义，不打以免误读
+        if not exempt:
+            if info["delta_chain"] is not None:
+                head += f" 链内{info['delta_chain']:+d}"
+            if info["delta_prev"] is not None:
+                head += f" 环比{info['delta_prev']:+d}"
+        tail = f"调用{b['calls']} out峰值{b['max_out']}"
+        if b["max_cached"]:
+            tail += f" cached峰值{b['max_cached']}"
+        # 「未缓存」= 末次调用真正需要重算 prefill 的 token 数（≈ 新增量）。
+        # 它是判断「服务端 KV 是否被重建」最直接的指标：接近 input 就是整段重算，
+        # 只有几百则说明前缀缓存生效、本轮是增量。
+        tail += f" 未缓存≈{max(b['last_input'] - b['last_cached'], 0)}"
+        _auto_log(f"[上下文] {b['stage']:<15}| {head} | {tail}")
+
+        # 探测类调用（warmup/canary）到此为止：其 input 不代表真实上下文（无 system/
+        # 历史），不能拿去刷新显示值或当环比基准，否则状态栏会闪一下小数值
+        if exempt:
+            self._usage_bucket = self._new_bucket()
+            return
+
+        # 告警只在「级别升级」时提示一次：跨阶段反复刷同一条没有价值
+        level = info["level"]
+        order = {"ok": 0, "unknown": 0, "warn": 1, "crit": 2}
+        if order[level] > order[self._usage_alert_level]:
+            if level == "crit":
+                _auto_log(f"[上下文] ✗ 已用 {ratio * 100:.1f}% ({peak}/{limit})，建议尽快重建会话链",
+                          level=logging.ERROR)
+            elif level == "warn":
+                _auto_log(f"[上下文] ⚠ 已用 {ratio * 100:.1f}% ({peak}/{limit})，接近上限",
+                          level=logging.WARNING)
+        self._usage_alert_level = level
+
+        self.last_context_info = info
+        # 汇总已取代实时快照：否则状态栏会一直停在阶段末的那次调用上
+        self._live_info = {}
+        self._usage_prev_input = b["last_input"]
+        self._usage_bucket = self._new_bucket()
+
+    def flush_usage(self) -> None:
+        """循环出口落盘（幂等）：把 *-Round-N* 累积的桶汇总成一行"""
+        try:
+            self._flush_usage_row()
+        except Exception as e:
+            _auto_log(f"[调试] 上下文汇总失败: {e}")
+
+    def get_context_info(self) -> dict:
+        """上下文占用快照（只读内存字段、不发请求；供 GUI 状态栏 / CLI / 命令使用）
+
+        优先返回实时快照：多轮阶段未到出口 flush 时，它是「此刻」的值；
+        阶段汇总后实时快照被清空，回退到带环比/告警的落盘值。
+        """
+        return dict(self._live_info or self.last_context_info)

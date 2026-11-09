@@ -67,6 +67,7 @@ Read them in [`showcase/`](showcase/README.md): case studies, full texts (Markdo
 - **Notes (Note)**: Action/memo entries; point-in-time reviews periodically clean up invalid, outdated, or mergeable note entries
 - **Web Search**: EGO can autonomously call Tavily via the WEB_SRCH instruction to retrieve external information, degrading gracefully and feeding the failure reason back into the next round
 - **Memory System**: ChromaDB vector memory + memory anchors + small-model structured summaries
+- **Context / KV-Cache Monitoring**: every response's `usage` is collected and summarised into one line per stage (peak, remaining, chain-internal delta, round-over-round delta, cached tokens, and `uncached≈` — the prefix actually recomputed); the GUI status bar and the CLI show live occupancy with ok/warn/crit levels. Read-only statistics: nothing is rebuilt, trimmed or rewritten
 - **Injection Guard**: Rejects forged instruction blocks (`【系统` / `【EGO`) and explicit jailbreak wording — role stability is held by L1/L2, not by keyword blacklists
 
 ## Quick Start
@@ -96,7 +97,7 @@ All configuration items are centralized in `config.py` and overridden via enviro
 **Configuration Steps**:
 
 1. Copy the template to a local config: `copy untitled.env.example untitled.env` (use `cp` on Linux/macOS).
-2. Modify the config items you want to override as needed; the full list has **118 items**, corresponding one-to-one with `config.py`.
+2. Modify the config items you want to override as needed; the full list has **125 items**, corresponding one-to-one with `config.py`.
 3. `untitled.env` contains local service addresses and personal tuning, so **do not commit it to the repository** (already ignored by `.gitignore`).
 
 ### 4. Launch
@@ -114,7 +115,7 @@ python EGO_GUI.py    # tkinter GUI entry
 ego-agent/
 ├── EGO_CLI.py                 # CLI entry: interaction and resource cleanup
 ├── EGO_GUI.py                 # GUI entry (tkinter), shares session state with the CLI
-├── config.py                  # Global configuration (118 environment-variable items, grouped by function)
+├── config.py                  # Global configuration (125 environment-variable items, grouped by function)
 ├── untitled.env.example       # Environment-variable template (copy to untitled.env and edit as needed)
 ├── requirements.txt           # Python dependencies
 ├── agent/
@@ -130,7 +131,7 @@ ego-agent/
 │   ├── coldstart_cache.py     # ColdstartCache: coldstart_cache.json I/O, MD5 fingerprints, response_id write-back
 │   ├── coldstart_runner.py    # ColdstartRunner: step-by-step LLM calls per sys.json, memory-instruction execution, cache buffering
 │   │
-│   ├── llm.py                 # LM Studio Responses API client (unified entry chat(), streaming output)
+│   ├── llm.py                 # LM Studio Responses API client (unified entry chat(), streaming output, context usage collection)
 │   ├── prompts.py             # Two-layer self core management (separated L1 + L2 structure)
 │   ├── instructions.py        # LLM autonomous instruction registry (parsing/execution/priority/protocol, all derived from one place)
 │   ├── normalize.py           # Instruction normalization layer (natural-language payload → standard protocol, small-model translation)
@@ -159,6 +160,7 @@ ego-agent/
 - **Flow vs. state**: `ego_loop.py` owns the process, `ego_state.py` owns the fields that survive between rounds (pure data, no in-package imports), so chat / think / note share one loop instead of three near-copies.
 - **Session lifecycle as its own group**: `session.py` is the only entry, and it separates cache (`coldstart_cache.py`), execution (`coldstart_runner.py`) and rebuild (`session_rebuilder.py`); none of the three holds a reference to another.
 - **One owner per side effect**: entries are persisted only by `HistoryStore.add()` — the one place where the `stage` tag is stamped — and every response snapshot goes through `debug_log.py`.
+- **One aggregation point for context statistics**: per-call `usage` accumulates in a stage bucket and is flushed exactly once at the loop exit (with an idempotent fallback in `_process_input`'s `finally`), so a multi-round turn produces one line instead of N — and the display layer only ever reads memory, never issues a request.
 
 ## Three-Layer Runtime Architecture (Scheduler / Injection / Execution)
 
@@ -211,7 +213,7 @@ EGO uses a dual-track instruction architecture, and both mechanisms are registry
 
 ### LLM Autonomous Instructions (agent/instructions.py)
 
-Triggered automatically when the model embeds XML tags in its reply. The `@register_instruction` registry derives the parsing regex, correction loop, execution priority, and system-prompt protocol description. The parser has built-in fault tolerance (strict on the prompt, lenient in code): an open tag mistaken for a close tag, a mismatched close tag (e.g. `<COG_DEL> xxx </COG_ADD>`), bare reference tags inside THINK, bare reference open tags in prose (e.g. "while in `<SAY>` I'll keep my tone warm" — only those that still have a same-tag close tag ahead are masked, so the real instruction is never swallowed; a genuinely forgotten close tag still falls back to lenient matching), case variants of tags (e.g. `<think>`/`</Think>`), and reference-state tags wrapped in quotes/backticks (e.g. a `<THINK>...</THINK>` example in SAY output, preserved during both parsing and stripping) are all handled correctly. L1 additionally forbids bare instruction tags in the think stream, so the prompt and the parser cover each other.
+Triggered automatically when the model embeds XML tags in its reply. The `@register_instruction` registry derives the parsing regex, correction loop, execution priority, and system-prompt protocol description. The parser has built-in fault tolerance (strict on the prompt, lenient in code): an open tag mistaken for a close tag, a mismatched close tag (e.g. `<COG_DEL> xxx </COG_ADD>`), bare reference tags inside THINK, bare reference open tags in prose (e.g. "while in `<SAY>` I'll keep my tone warm" — only those that still have a same-tag close tag ahead are masked, so the real instruction is never swallowed; a genuinely forgotten close tag still falls back to lenient matching), case variants of tags (e.g. `<think>`/`</Think>`), and reference-state tags wrapped in quotes/backticks (e.g. a `<THINK>...</THINK>` example in SAY output, preserved during both parsing and stripping), plus backtick spans paired strictly in order (1st–2nd, 3rd–4th) so a stray closing backtick can never swallow the real instruction sitting between two inline-code fragments, are all handled correctly. L1 additionally forbids bare instruction tags in the think stream, so the prompt and the parser cover each other.
 
 | Instruction | Type | Description |
 |------|------|------|
@@ -287,6 +289,8 @@ Borrowing the scheduling pattern of point-in-time introspection, each day at a f
 ## Session and Context Management
 
 - **Stateful session chain via the Responses API**: Chained reuse of the server-side KV Cache through `previous_response_id`, avoiding resending the entire history each round
+- **Context occupancy is measured, not guessed**: the `usage` block carried by every response is the only source — `input_tokens` is already the cumulative value on the current chain, so it *is* the current occupancy and costs no extra generation request. The denominator is `loaded_context_length` from `/api/v0/models`, cached for `EGO_CONTEXT_INFO_TTL`; a failed lookup backs off 4× and warns once, degrading to "limit unknown" rather than passing `max_context_length` off as the limit. Chain switches are detected by the parent relationship (`previous_response_id`), never by response IDs (they change on every call), so `/clear`, a pure-think-stream rollback, a session rebuild and a restart each reset the baseline — while the very first call after startup is not reported as a switch. Warmup/canary probes follow the chain head but never feed the display or the round-over-round baseline (their input carries no system prompt or history). Multi-round stages (`EGO-Round-N`) accumulate in a bucket and flush once at the loop exit; single-call stages (Think step / coldstart / rebuild / reflection / probe) log immediately.
+- **Reading the numbers**: each flushed stage prints one line — peak, ratio and remaining, chain-internal and round-over-round deltas, cached peak, and `uncached≈` (last input minus cached tokens). That last figure is the most direct signal of server-side KV behaviour: close to the input size means the whole prefix was recomputed, a few hundred tokens means prefix caching worked and only the new part was prefilled. Occupancy is surfaced as the GUI status bar (right side, throttled by `EGO_CONTEXT_STATUS_REFRESH`, grey→orange→red for ok/warn/crit), one line after each CLI reply (`EGO_CONTEXT_CLI_ECHO`) and in `/context` (also appended to `/status`). Alerts fire only on escalation — warn at `EGO_CONTEXT_WARN_RATIO` (default `0.60`), crit at `EGO_CONTEXT_CRIT_RATIO` (`0.80`) — so a nearly full context does not spam the log every round; `EGO_CONTEXT_MONITOR_ENABLED=false` disables collection and display entirely.
 - **Coldstart and Preheat**: On first startup, the initial state is established step by step according to the prompt library in `sys.json`; their Q&A is written only to `coldstart_cache.json` (reused for Session rebuild) and no longer to `history.json`, so a restart rebuild relies solely on real conversations
 - **Conversation-history scope (`get_chat_history`)**: Session initialization / rebuild / preheat injection and the CLI/GUI restart replay all share `agent.get_chat_history()`, which returns only "conversations with the user" (`stage` is `None` or `chat`, via the `CHAT_HISTORY_STAGES` whitelist) and skips internal-stage output such as self-dialogue (think), note execution (note) and reflection; those entries are still kept in `history.json` for traceability but no longer enter the model context, so internal thinking cannot pollute a restart/reconnect rebuild
 - **Filter first, then slice**: The entry cap (`EGO_SESSION_INIT_HISTORY_COUNT`, default 20) means "the most recent N user conversations"; internal-stage entries no longer consume that budget
@@ -310,7 +314,8 @@ Both the CLI input and the GUI input/menu bar support the same command set; comm
 
 | Command | Description |
 |------|------|
-| `/status` | View EGO's current status (self core, memory anchors, etc.) |
+| `/status` | View EGO's current status (self core, memory anchors, etc.; includes context occupancy) |
+| `/context` | View context / KV-cache occupancy (used / limit / peak / round-over-round) |
 | `/clear` | Clear the conversation history |
 | `/think` | Manually trigger a self-dialogue task |
 | `/reflect` | Manually trigger an introspection task |
@@ -335,7 +340,7 @@ Typing text directly starts a conversation with EGO. EGO first runs multiple rou
 
 ## Common Configuration Items
 
-The full list (118 items) is in `untitled.env.example` and `config.py`; the core items are below:
+The full list (125 items) is in `untitled.env.example` and `config.py`; the core items are below:
 
 | Environment variable | Description | Default |
 |---------|------|-------|
@@ -370,6 +375,13 @@ The full list (118 items) is in `untitled.env.example` and `config.py`; the core
 | `EGO_SESSION_ID_PROBE_MAX_TOKENS` | Output-token cap for the rebuild canary probe (the old value of 1 truncated the canary) | `64` |
 | `EGO_SESSION_CANARY_TOKEN` | Expected canary the probe relies on (must match the L1 protocol in `prompts.py`) | `9527` |
 | `EGO_SESSION_CANARY_ENABLED` | Enable the canary probe; when off, falls back to status-code-only judgment | `true` |
+| `EGO_CONTEXT_MONITOR_ENABLED` | Enable context occupancy monitoring (collection + display) | `true` |
+| `EGO_CONTEXT_WARN_RATIO` | Occupancy ratio that triggers a WARN alert | `0.60` |
+| `EGO_CONTEXT_CRIT_RATIO` | Occupancy ratio that triggers a CRIT alert (consider rebuilding the chain) | `0.80` |
+| `EGO_CONTEXT_INFO_TTL` | Cache TTL for `loaded_context_length` (seconds); a failed lookup backs off 4× | `60` |
+| `EGO_CONTEXT_INFO_TIMEOUT` | Timeout for the context-limit probe (seconds) | `3` |
+| `EGO_CONTEXT_STATUS_REFRESH` | GUI status-bar occupancy refresh throttle (seconds) | `2.0` |
+| `EGO_CONTEXT_CLI_ECHO` | Print one context line after each CLI reply | `true` |
 
 ## Safety Mechanisms
 

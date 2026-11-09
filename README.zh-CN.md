@@ -67,6 +67,7 @@ EGO 是一个以**两层自我核心**为骨架的智能体运行时：不可更
 - **备忘录（Note）**：执行类/备忘类条目；定点审查定期清理失效、过时或可合并的备忘录条目
 - **联网检索**：EGO 可通过 WEB_SRCH 指令自主调用 Tavily 检索外部信息，失败降级并将原因回注下一轮
 - **记忆系统**：ChromaDB 向量记忆 + 记忆锚点 + 小模型结构化摘要
+- **上下文 / KV Cache 监控**：采集每次响应的 `usage`，按阶段汇总成一行（峰值、余量、链内增量、环比、缓存命中，以及 `未缓存≈`——真正被重算的前缀量）；GUI 状态栏与 CLI 实时显示占用并按 ok/warn/crit 分级配色。纯只读统计，不重建、不裁剪、不改写请求
 - **注入防护**：拒绝伪造指令块（`【系统` / `【EGO`）与显式越狱词；角色稳定性由 L1/L2 承担，而非关键词黑名单
 
 ## 快速开始
@@ -96,7 +97,7 @@ pip install -r requirements.txt
 **配置流程**：
 
 1. 复制模板为本地配置：`copy untitled.env.example untitled.env`（Linux/macOS 用 `cp`）。
-2. 按需修改要覆盖的配置项；完整清单共 **118 项**，与 `config.py` 逐项对应。
+2. 按需修改要覆盖的配置项；完整清单共 **125 项**，与 `config.py` 逐项对应。
 3. `untitled.env` 含本地服务地址与个人调参，**请勿提交到仓库**（已由 `.gitignore` 忽略）。
 
 ### 4. 启动
@@ -114,7 +115,7 @@ python EGO_GUI.py    # tkinter GUI 入口
 ego-agent/
 ├── EGO_CLI.py                 # CLI 入口，交互与资源清理
 ├── EGO_GUI.py                 # GUI 入口（tkinter），与 CLI 共用会话状态
-├── config.py                  # 全局配置（118 个环境变量项，按功能分组）
+├── config.py                  # 全局配置（125 个环境变量项，按功能分组）
 ├── untitled.env.example       # 环境变量配置模板（复制为 untitled.env 后按需修改）
 ├── requirements.txt           # Python 依赖
 ├── agent/
@@ -130,7 +131,7 @@ ego-agent/
 │   ├── coldstart_cache.py     # ColdstartCache：coldstart_cache.json 读写、MD5 指纹、response_id 回写
 │   ├── coldstart_runner.py    # ColdstartRunner：按 sys.json 步骤逐条调用 LLM、执行记忆类指令、写缓存缓冲
 │   │
-│   ├── llm.py                 # LM Studio Responses API 客户端（统一入口 chat()，流式输出）
+│   ├── llm.py                 # LM Studio Responses API 客户端（统一入口 chat()，流式输出，采集上下文 usage）
 │   ├── prompts.py             # 两层自我核心管理（L1 + L2 分离结构）
 │   ├── instructions.py        # LLM 自主指令注册表（解析/执行/优先级/协议全链路派生）
 │   ├── normalize.py           # 指令归一化层（自然语言 payload → 标准协议，小模型转译）
@@ -154,11 +155,12 @@ ego-agent/
     └── debug_logs/            # LLM 响应调试快照
 ```
 
-`core.py` 只做装配与编排：按依赖顺序把 LLM 客户端、提示词、记忆、指令执行器、事件总线、调度器、历史与会话接好，然后把每一轮对话交给循环引擎。拆分沿三条边界：
+`core.py` 只做装配与编排：按依赖顺序把 LLM 客户端、提示词、记忆、指令执行器、事件总线、调度器、历史与会话接好，然后把每一轮对话交给循环引擎。拆分沿四条边界：
 
 - **流程与状态分离**：`ego_loop.py` 持有流程，`ego_state.py` 只描述跨轮字段（纯数据、不依赖包内模块），于是 chat / think / note 共用一套循环，而不是三份近似的副本。
 - **会话生命周期自成一组**：`session.py` 是唯一入口，内部再分出缓存（`coldstart_cache.py`）、执行（`coldstart_runner.py`）与重建（`session_rebuilder.py`），三者互不持有对方。
 - **每种副作用只有一个出口**：历史条目只由 `HistoryStore.add()` 落盘（`stage` 标记也只在那一处成形），响应快照则统一走 `debug_log.py`。
+- **上下文统计只有一个汇总点**：单次调用的 `usage` 先累积到阶段桶，只在循环出口汇总一次（`_process_input` 的 `finally` 另有幂等兜底），因此多轮交互只产出一行而非 N 行；显示层全程只读内存字段，不发起任何请求。
 
 ## 三层运行架构（调度层 / 注入层 / 执行层）
 
@@ -211,7 +213,7 @@ EGO 采用双轨指令架构，两套机制均由注册表驱动（一处定义�
 
 ### LLM 自主指令（agent/instructions.py）
 
-由模型在回复中嵌入 XML 标签自动触发。`@register_instruction` 注册表派生解析正则、纠错循环、执行优先级与系统提示词协议说明。解析引擎内置容错机制（prompt 从严、代码宽容）：开标签误作闭标签、闭合标签张冠李戴（如 `<COG_DEL> xxx </COG_ADD>`）、THINK 内裸引用标签、正文裸写的引用态开标签（如思考流里写“同时在 `<SAY>` 中输出温情”——只屏蔽其后方仍存在同标签闭合标签的那些，真实指令不受牵连；忘记写闭合标签的情形仍走宽松匹配兜底）、标签大小写变体（如 `<think>`/`</Think>`）、引号/反引号包裹的引用态标签（如 SAY 输出中的 `<THINK>...</THINK>` 示例，解析与剥离时均予保留）等边界情况均可正确处理。L1 同时在提示词侧要求思考流不得裸写指令标签，两侧互为兜底。
+由模型在回复中嵌入 XML 标签自动触发。`@register_instruction` 注册表派生解析正则、纠错循环、执行优先级与系统提示词协议说明。解析引擎内置容错机制（prompt 从严、代码宽容）：开标签误作闭标签、闭合标签张冠李戴（如 `<COG_DEL> xxx </COG_ADD>`）、THINK 内裸引用标签、正文裸写的引用态开标签（如思考流里写“同时在 `<SAY>` 中输出温情”——只屏蔽其后方仍存在同标签闭合标签的那些，真实指令不受牵连；忘记写闭合标签的情形仍走宽松匹配兜底）、标签大小写变体（如 `<think>`/`</Think>`）、引号/反引号包裹的引用态标签（如 SAY 输出中的 `<THINK>...</THINK>` 示例，解析与剥离时均予保留）、反引号片段严格按出现顺序成对配对（第 1–2 个、第 3–4 个，避免前一段行内代码的结束反引号跨过中间的真实指令去与后一段配对）等边界情况均可正确处理。L1 同时在提示词侧要求思考流不得裸写指令标签，两侧互为兜底。
 
 | 指令 | 类型 | 说明 |
 |------|------|------|
@@ -287,6 +289,8 @@ Think 在后台线程中执行，复用 EGO 主循环与 `EGO_MAX_ROUNDS` 轮次
 ## 会话与上下文管理
 
 - **Responses API 有状态会话链**：通过 `previous_response_id` 链式复用服务端 KV Cache，避免每轮重发全部历史
+- **上下文占用是量出来的，不是估的**：每份响应自带的 `usage` 是唯一数据源——`input_tokens` 本就是“当前链上的累计值”，取到即是当前占用，不需额外发一次生成请求。分母取 `/api/v0/models` 的 `loaded_context_length`，按 `EGO_CONTEXT_INFO_TTL` 缓存；取不到时退避间隔 ×4 重试且只提示一次，降级为“上限未知”，绝不用 `max_context_length` 冒充上限而虚报余量。换链判定靠父子关系（`previous_response_id`），不靠响应 id（它每次都变）：`/clear`、纯思考流回滚、会话重建、重启复用都会重置基线，而启动后的首次调用不会误报换链。warmup/canary 探测会跟随链头，但绝不进入显示值与环比基准（它们的 input 不含 system 与历史）。多轮阶段（`EGO-Round-N`）先累积到阶段桶、到循环出口汇总一次；单次调用阶段（Think step / 冷启动 / 重建 / 自省 / 探测）立即落盘。
+- **数字怎么看**：每个阶段汇总一行——峰值、占比与余量、链内增量、环比、缓存峰值，以及 `未缓存≈`（末次 input 减缓存命中）。最后一项是判断服务端 KV 行为最直接的指标：接近 input 就是整段前缀被重算，只剩几百 token 则说明前缀缓存生效、本轮只是增量 prefill。占用有三处出口：GUI 状态栏右侧（由 `EGO_CONTEXT_STATUS_REFRESH` 节流，ok/warn/crit 对应灰/橙/红）、CLI 每轮回复后的一行简讯（`EGO_CONTEXT_CLI_ECHO`）、以及 `/context` 命令（同时附在 `/status` 中）。告警只在级别升级时提示——占 `EGO_CONTEXT_WARN_RATIO`（默认 `0.60`）打 WARN，占 `EGO_CONTEXT_CRIT_RATIO`（`0.80`）打 CRIT——避免上下文接近满时每轮刷一条；`EGO_CONTEXT_MONITOR_ENABLED=false` 可整个关掉采集与显示。
 - **冷启动（Coldstart）与预热（Preheat）**：首次启动时按 `sys.json` 提示词库分步建立初始状态；其问答仅写入 `coldstart_cache.json`（供 Session 重建复用），不再写入 `history.json`，因此重启重建只基于真实对话
 - **对话历史口径（`get_chat_history`）**：会话初始化 / 重建 / 预热注入与 CLI/GUI 重启回显共用 `agent.get_chat_history()`，只取“与用户的对话”（`stage` 为 `None` 或 `chat`，白名单常量 `CHAT_HISTORY_STAGES`），跳过自对话（think）、备忘录执行（note）、反思等内部阶段输出；这些条目仍保留在 `history.json` 中供追溯，但不再进入模型上下文，避免重启/断连重建后被内部思考污染
 - **先过滤后切片**：条数上限（`EGO_SESSION_INIT_HISTORY_COUNT`，默认 20）表示“最近 N 条用户对话”，内部阶段条目不再挤占额度
@@ -310,7 +314,8 @@ CLI 输入框与 GUI 输入框/菜单栏均支持同一套命令；命令定义�
 
 | 命令 | 说明 |
 |------|------|
-| `/status` | 查看 EGO 当前状态（自我核心、记忆锚点等） |
+| `/status` | 查看 EGO 当前状态（自我核心、记忆锚点等，含上下文占用） |
+| `/context` | 查看上下文空间占用（已用/上限/峰值/环比） |
 | `/clear` | 清空对话历史 |
 | `/think` | 手动触发一次自对话任务 |
 | `/reflect` | 手动触发一次自省任务 |
@@ -335,7 +340,7 @@ CLI 输入框与 GUI 输入框/菜单栏均支持同一套命令；命令定义�
 
 ## 常用配置项
 
-完整清单（118 项）见 `untitled.env.example` 与 `config.py`，以下为核心项：
+完整清单（125 项）见 `untitled.env.example` 与 `config.py`，以下为核心项：
 
 | 环境变量 | 说明 | 默认值 |
 |---------|------|-------|
@@ -370,6 +375,13 @@ CLI 输入框与 GUI 输入框/菜单栏均支持同一套命令；命令定义�
 | `EGO_SESSION_ID_PROBE_MAX_TOKENS` | 重建口令探测的输出 token 上限（旧值 1 会截断口令） | `64` |
 | `EGO_SESSION_CANARY_TOKEN` | 口令探测期望应答的口令（须与 `prompts.py` L1 协议一致） | `9527` |
 | `EGO_SESSION_CANARY_ENABLED` | 启用口令探测；关闭后回落为仅判状态码 | `true` |
+| `EGO_CONTEXT_MONITOR_ENABLED` | 上下文占用监控总开关（采集 + 显示） | `true` |
+| `EGO_CONTEXT_WARN_RATIO` | 占用达到该占比时告警（WARN） | `0.60` |
+| `EGO_CONTEXT_CRIT_RATIO` | 占用达到该占比时告警（CRIT，建议重建会话链） | `0.80` |
+| `EGO_CONTEXT_INFO_TTL` | `loaded_context_length` 缓存秒数；获取失败时退避间隔 ×4 | `60` |
+| `EGO_CONTEXT_INFO_TIMEOUT` | 取上下文上限的 HTTP 超时（秒） | `3` |
+| `EGO_CONTEXT_STATUS_REFRESH` | GUI 状态栏占用刷新节流（秒） | `2.0` |
+| `EGO_CONTEXT_CLI_ECHO` | CLI 每轮回复后打印一行上下文占用简讯 | `true` |
 
 ## 安全机制
 

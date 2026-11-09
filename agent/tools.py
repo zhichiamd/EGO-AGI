@@ -154,6 +154,13 @@ def _cmd_status(agent, args: list) -> CommandResult:
     return CommandResult(agent.get_status())
 
 
+@register_command("context", help="查看上下文空间占用（已用/上限/峰值/环比）",
+                  gui_items=(GuiItem("命令", "🧮 上下文占用 (/context)", popup=True),))
+def _cmd_context(agent, args: list) -> CommandResult:
+    """上下文占用详情：数据来自 LLM 响应 usage（只读统计，不触发任何请求）"""
+    return CommandResult(agent.format_context_detail())
+
+
 @register_command("clear", help="清空对话历史",
                   gui_items=(GuiItem("命令", "🧹 清空历史 (/clear)"),))
 def _cmd_clear(agent, args: list) -> CommandResult:

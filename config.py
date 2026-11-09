@@ -277,7 +277,7 @@ SESSION_CANARY_TOKEN = os.getenv("EGO_SESSION_CANARY_TOKEN", "9527")
 # 【可选逃生开关】关闭后回落为原“仅判状态码”，避免模型系统性不遵从导致永久无法启动
 SESSION_CANARY_ENABLED = os.getenv("EGO_SESSION_CANARY_ENABLED", "true").lower() == "true"
 # Session 重建完成后等待间隔（秒），给 LMStudio 时间整理 KV cache
-SESSION_REBUILD_POST_DELAY = int(os.getenv("EGO_SESSION_REBUILD_POST_DELAY", "120"))
+SESSION_REBUILD_POST_DELAY = int(os.getenv("EGO_SESSION_REBUILD_POST_DELAY", "60"))
 # ── 循环兜底参数 ──────────────────────────────
 # 单轮/全程检索次数上限（MEMO_RD / NOTE_RD / WEB_SRCH 共用同一预算，超过则停止检索）
 MEMO_RD_ROUND_LIMIT = int(os.getenv("EGO_MEMO_RD_ROUND_LIMIT", "3"))
@@ -316,6 +316,22 @@ HTTP_POOL_CONNECTIONS = int(os.getenv("EGO_HTTP_POOL_CONNECTIONS", "10"))
 HTTP_POOL_MAXSIZE     = int(os.getenv("EGO_HTTP_POOL_MAXSIZE", "20"))
 # 系统侧低温度调用（Session 预热/重建）：低温快速、稳定
 TEMPERATURE_WARMUP = float(os.getenv("EGO_TEMPERATURE_WARMUP", "0.1"))
+
+# ── 上下文占用监控（采集 + 显示 + 告警；只读，不重建/不裁剪）───────
+# 总开关：关闭后不采集 usage、不取上下文容量，GUI/CLI 不显示占用
+CONTEXT_MONITOR_ENABLED = os.getenv("EGO_CONTEXT_MONITOR_ENABLED", "true").lower() == "true"
+# 告警阈值（占 loaded_context_length 的比例）：WARN 提示接近上限，CRIT 建议重建会话链
+CONTEXT_WARN_RATIO     = float(os.getenv("EGO_CONTEXT_WARN_RATIO", "0.60"))
+CONTEXT_CRIT_RATIO     = float(os.getenv("EGO_CONTEXT_CRIT_RATIO", "0.80"))
+# 上下文容量（/api/v0/models 的 loaded_context_length）缓存 TTL（秒）：
+# 成功/失败都写时间戳，避免服务未启动时反复重试拖慢首轮对话
+CONTEXT_INFO_CACHE_TTL = int(os.getenv("EGO_CONTEXT_INFO_TTL", "60"))
+# 容量探测请求超时（秒）：本地服务，短超时即可，失败静默降级为「上限未知」
+CONTEXT_INFO_TIMEOUT   = int(os.getenv("EGO_CONTEXT_INFO_TIMEOUT", "3"))
+# GUI 状态栏刷新节流（秒）：避免每次轮询都读一次（数据本身是内存字段，开销极小）
+CONTEXT_STATUS_REFRESH = float(os.getenv("EGO_CONTEXT_STATUS_REFRESH", "2.0"))
+# CLI 每轮回复后是否打印一行上下文简讯（关闭后仍可用 /context 查看）
+CONTEXT_CLI_ECHO = os.getenv("EGO_CONTEXT_CLI_ECHO", "true").lower() == "true"
 
 
 
