@@ -211,9 +211,39 @@ def _normalize_tag_case(text: str) -> str:
 
 
 # ── 引号/反引号包裹的指令标记保护（parse_instructions 与 strip_instructions 共用）──
+def _protect_backtick_spans(text: str, tag_alt: str, protect) -> str:
+    """把「内含指令标签的反引号片段」整体替换为占位符。
+
+    反引号必须按出现顺序两两配对（与 Markdown 行内代码一致）：第 1 个开、第 2 个闭、
+    第 3 个开……。不能像引号那样用 `...<TAG>...</TAG>...` 正则去扫：那样会把**前一段
+    行内代码的结束反引号**当成后一段的开始反引号，跨过中间的真实指令。实测
+    `N_299` … `N_296` 之间的 `</SAY> <SAY>` 被整段吞进占位符，两条 SAY 被并成一条
+    脏载荷（GUI 直接把 `</SAY> <SAY>` 显示给用户）。
+
+    仅当片段内含指令标签时才保护，普通行内代码（如 `N_299`）原样保留。
+    """
+    tag_re = re.compile(rf'</?(?:{tag_alt})>')
+    out = []
+    last = 0
+    open_match = None
+    for m in re.finditer(r'`{1,2}', text):
+        if open_match is None:
+            open_match = m
+            continue
+        inner = text[open_match.end():m.start()]
+        if tag_re.search(inner):
+            out.append(text[last:open_match.start()])
+            out.append(protect(text[open_match.start():m.end()]))
+            last = m.end()
+        open_match = None
+    out.append(text[last:])
+    return "".join(out)
+
+
 def _build_quote_protection_patterns(tag_alt: str) -> list:
     """构建“被引号包裹的指令标记”保护正则（标签列表实时派生自注册表）。
 
+    反引号不在此列：它由 _protect_backtick_spans 成对扫描处理（见该函数说明）。
     所有引号/括号内的通配符都限制不跨行，防止吞噬其他指令标签；
     配对标签额外限制中间不能出现同类分隔符（避免误匹配）。
 
@@ -223,11 +253,6 @@ def _build_quote_protection_patterns(tag_alt: str) -> list:
     闭合标签 `</TAG>` 会被误当作真实指令闭合，导致该指令载荷被截断。
     """
     return [
-        # 反引号
-        rf'`{{1,2}}([^`\u000a\u000d]*<({tag_alt})>[^<`\u000a\u000d]*</\2>[^`\u000a\u000d]*)`{{1,2}}',  # 配对
-        rf'`{{1,2}}([^`\u000a\u000d]*<({tag_alt})>[^`\u000a\u000d]*)`{{1,2}}',  # 单开
-        rf'`{{1,2}}([^`\u000a\u000d]*</({tag_alt})>[^`\u000a\u000d]*)`{{1,2}}',  # 闭合引用
-
         # 英文双引号
         rf'"([^"\u000a\u000d]*<({tag_alt})>[^<"\u000a\u000d]*</\2>[^"\u000a\u000d]*)"',  # 配对
         rf'"([^"\u000a\u000d]*<({tag_alt})>[^"\u000a\u000d]*)"',  # 单开
@@ -250,21 +275,33 @@ def _protect_quoted_tags(text: str, tag_alt: str):
     placeholder_map = {}
     counter = [0]
 
-    def replace_quoted(match):
+    def protect(raw: str) -> str:
         placeholder = f"__QUOTED_{counter[0]}__"
-        placeholder_map[placeholder] = match.group(0)
+        placeholder_map[placeholder] = raw
         counter[0] += 1
         return placeholder
 
+    # 反引号走成对扫描（不能用正则跨引号匹配，见 _protect_backtick_spans）
+    text = _protect_backtick_spans(text, tag_alt, protect)
     for pattern in _build_quote_protection_patterns(tag_alt):
-        text = re.sub(pattern, replace_quoted, text)
+        text = re.sub(pattern, lambda m: protect(m.group(0)), text)
     return text, placeholder_map
 
 
 def _restore_placeholders(text: str, placeholder_map: dict) -> str:
-    """将占位符恢复为原始文本。"""
-    for placeholder, original in placeholder_map.items():
-        text = text.replace(placeholder, original)
+    """将占位符恢复为原始文本。
+
+    需反复替换到稳定：被保护的片段内部可能嵌着更早生成的占位符（如引号区里又
+    包含一段被保护的行内代码引用），单次遍历会把内层占位符漏在原文里。
+    """
+    for _ in range(len(placeholder_map) + 1):
+        changed = False
+        for placeholder, original in placeholder_map.items():
+            if placeholder in text:
+                text = text.replace(placeholder, original)
+                changed = True
+        if not changed:
+            break
     return text
 
 
